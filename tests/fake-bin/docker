@@ -14,6 +14,11 @@
 //   FAKE_DOCKER_CALLS  calls log path
 //   FAKE_DOCKER_PORT   published port for the fake container (8088)
 //   FAKE_DOCKER_DELAY_MS  artificial delay for `up` (busy-lock tests)
+//   FAKE_DOCKER_PS_FORMAT 'json' (default: one compact JSON array,
+//     like newer Compose v2) or 'ndjson' (one object per line,
+//     like older Compose v2)
+//   FAKE_DOCKER_PS_WARN '1' to print a human warning line on stdout
+//     before the ps payload, like real compose/Desktop sometimes do
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -70,26 +75,51 @@ state[project] = entry;
 
 function ensureContainer() {
   if (!entry.containers.length) {
+    // Field set mirrors real `docker compose ps --format json`
+    // output (Compose v2): ID, Name, Image, Command, Project,
+    // Service, CreatedAt, State, Status, Health, ExitCode, Ports
+    // (human string), Publishers (structured), Labels, Networks,
+    // RunningFor.
     entry.containers = [{
+      ID: '9f2b7c1a4d5e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708',
       Name: `${project}-web-1`,
+      Image: 'nginx:alpine',
+      Command: '"/docker-entrypoint.sh nginx -g \'daemon off;\'"',
+      Project: project,
       Service: 'web',
+      CreatedAt: '2026-10-24 19:58:11 +0000 UTC',
       State: 'running',
       Status: 'Up 1 second',
       Health: 'healthy',
-      Publishers: [{
-        URL: '0.0.0.0',
-        TargetPort: publishedPort,
-        PublishedPort: publishedPort,
-        Protocol: 'tcp',
-      }],
+      ExitCode: 0,
+      Ports: `0.0.0.0:${publishedPort}->80/tcp, :::${publishedPort}->80/tcp`,
+      Publishers: [
+        { URL: '0.0.0.0', TargetPort: 80, PublishedPort: publishedPort, Protocol: 'tcp' },
+        { URL: '::', TargetPort: 80, PublishedPort: publishedPort, Protocol: 'tcp' },
+      ],
+      Labels: `com.docker.compose.project=${project},com.docker.compose.service=web,com.docker.compose.container-number=1`,
+      Networks: `${project}_default`,
+      RunningFor: '1 second ago',
+      Size: '0B',
     }];
   }
 }
 
 switch (sub) {
-  case 'ps':
-    process.stdout.write(`${JSON.stringify(entry.containers)}\n`);
+  case 'ps': {
+    let payload;
+    if ((process.env.FAKE_DOCKER_PS_FORMAT || 'json') === 'ndjson') {
+      payload = entry.containers.map((c) => JSON.stringify(c)).join('\n');
+      if (payload) payload += '\n';
+    } else {
+      payload = `${JSON.stringify(entry.containers)}\n`;
+    }
+    if (process.env.FAKE_DOCKER_PS_WARN === '1') {
+      process.stdout.write('time="2026-10-24T19:58:12Z" level=warning msg="the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"\n');
+    }
+    process.stdout.write(payload);
     break;
+  }
   case 'up': {
     const delayMs = Number(process.env.FAKE_DOCKER_DELAY_MS) || 0;
     if (delayMs > 0) spawnSync('sleep', [String(delayMs / 1000)]);

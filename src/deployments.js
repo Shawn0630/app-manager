@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
+import { tailText } from './run.js';
 
 const FILE = path.join(DATA_DIR, 'deployments.jsonl');
 
@@ -40,12 +41,30 @@ export function listDeployments(limit = 20) {
   return all.slice(-Math.max(1, limit)).reverse();
 }
 
-// Most recent real deployment for one app (kind "env" records from
-// .env edits are not deployments and are skipped). Null when none.
+// Most recent real deployment for one app. Only kind "deploy"
+// records count — "action" records (start/stop/restart) and "env"
+// records (.env edits) are activity, not deployments. Null when none.
 export function lastDeploymentFor(appId) {
   const all = readAllSync();
   for (let i = all.length - 1; i >= 0; i -= 1) {
-    if (all[i].appId === appId && all[i].kind !== 'env') return all[i];
+    if (all[i].appId === appId && all[i].kind === 'deploy') return all[i];
   }
   return null;
+}
+
+// Record one manual lifecycle action (start / stop / restart) in the
+// same journal, as kind "action", so the Activity panel shows every
+// operation — not only full deployments. Only the output TAIL is
+// kept, like deployment steps.
+export async function appendActionRecord({ appId, action, trigger = 'manual', result, durationMs, output }) {
+  await appendDeployment({
+    ts: new Date().toISOString(),
+    appId,
+    kind: 'action',
+    action,
+    trigger,
+    result,
+    durationMs,
+    output: tailText(output || ''),
+  });
 }

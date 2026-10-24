@@ -18,7 +18,7 @@ import express from 'express';
 import { PORT, CONFIG_PATH, DATA_DIR, APPS_ROOT, loadApps, saveApps } from './config.js';
 import { appStatus } from './status.js';
 import { composeRun, composeLogs } from './docker.js';
-import { listDeployments } from './deployments.js';
+import { listDeployments, appendActionRecord } from './deployments.js';
 import { runOp, BusyError } from './ops.js';
 import { appState } from './store.js';
 import { readEnvFile, saveEnvFile } from './envfile.js';
@@ -182,6 +182,29 @@ app.put('/api/apps/:id/env', async (req, res) => {
 });
 
 const ACTIONS = new Set(['start', 'stop', 'restart', 'update', 'check', 'redeploy']);
+
+// Run one lifecycle action (start/stop/restart) and journal it as a
+// kind:"action" record — success or failure — so the Activity panel
+// shows these operations too, not only deployments. The record is
+// written before the error propagates (runOp logs it), so a failed
+// start is visible in history as well.
+async function runAction(a, action, sub) {
+  const startedAt = Date.now();
+  try {
+    const { output } = await composeRun(a, sub);
+    await appendActionRecord({
+      appId: a.id, action, result: 'success',
+      durationMs: Date.now() - startedAt, output,
+    });
+  } catch (e) {
+    await appendActionRecord({
+      appId: a.id, action, result: 'failed',
+      durationMs: Date.now() - startedAt, output: e.output || e.stderr || e.message || String(e),
+    }).catch(() => {});
+    throw e;
+  }
+}
+
 app.post('/api/apps/:id/:action', (req, res) => {
   const a = byId.get(req.params.id);
   if (!a) return res.status(404).json({ error: 'app not found' });
@@ -189,9 +212,9 @@ app.post('/api/apps/:id/:action', (req, res) => {
   if (!ACTIONS.has(action)) return res.status(404).json({ error: 'unknown action' });
   const provider = getProvider(a.provider);
   try {
-    if (action === 'start') runOp(a, 'start', () => composeRun(a, ['up', '-d']));
-    else if (action === 'stop') runOp(a, 'stop', () => composeRun(a, ['stop']));
-    else if (action === 'restart') runOp(a, 'restart', () => composeRun(a, ['restart']));
+    if (action === 'start') runOp(a, 'start', () => runAction(a, 'start', ['up', '-d']));
+    else if (action === 'stop') runOp(a, 'stop', () => runAction(a, 'stop', ['stop']));
+    else if (action === 'restart') runOp(a, 'restart', () => runAction(a, 'restart', ['restart']));
     else if (action === 'update') runOp(a, 'update', () => provider.deploy(a, 'manual'));
     else if (action === 'redeploy') {
       if (typeof provider.redeploy !== 'function') return res.status(400).json({ error: `provider ${a.provider} does not support redeploy` });

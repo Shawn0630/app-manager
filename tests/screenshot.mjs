@@ -194,7 +194,7 @@ async function main() {
     await page.goto(`${BASE}/`, { waitUntil: 'networkidle0', timeout: 60_000 });
     await page.waitForSelector('.card', { timeout: 20_000 });
     await sleep(800);
-    await page.screenshot({ path: path.join(WORK, 'dashboard.png') });
+    await page.screenshot({ path: path.join(WORK, 'dashboard.png'), fullPage: true });
     console.log('saved dashboard.png');
 
     // Open the Environment editor and screenshot it (table mode,
@@ -207,6 +207,14 @@ async function main() {
     await sleep(600);
     await page.screenshot({ path: path.join(WORK, 'dashboard-env.png') });
     console.log('saved dashboard-env.png');
+
+    // Narrow viewport: cards must collapse to a single column
+    // without horizontal overflow.
+    await page.evaluate(() => document.getElementById('envClose').click());
+    await page.setViewport({ width: 420, height: 900 });
+    await sleep(600);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-mobile.png'), fullPage: true });
+    console.log('saved dashboard-mobile.png');
   } finally {
     if (browser) await browser.close();
     mgr.kill('SIGTERM');

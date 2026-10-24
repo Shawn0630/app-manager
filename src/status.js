@@ -38,7 +38,12 @@ export async function appStatus(app) {
     warning: app.warning || null,
     state: ps.state,
     containers: ps.containers,
+    // The most recent status-collection problem for this app (docker
+    // compose ps failing), or null when the last check succeeded.
+    // dockerError is kept as a backwards-compatible alias.
+    statusError: ps.error,
     dockerError: ps.error,
+    statusCheckedAt: ps.checkedAt,
     commit,
     commitError: localResult.ok ? null : localResult.error,
     remote: st.remoteHead ? { head: st.remoteHead, short: st.remoteHead.slice(0, 7) } : null,

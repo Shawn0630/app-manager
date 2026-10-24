@@ -33,6 +33,9 @@ development).
   `docker compose up -d --build` → `docker compose ps` to verify.
   Every run — success or failure — is appended to
   `data/deployments.jsonl` with per-step exit codes and output tails.
+  Start / Stop / Restart are journaled there too, as lightweight
+  `kind: "action"` records (action, result, duration, output tail),
+  and the dashboard's Activity feed shows all three kinds.
 - **.env editing**: table editor (values masked by default) or raw
   text editor. Saves are validated line by line, written atomically,
   the previous version is backed up, and only the changed **key
@@ -263,11 +266,13 @@ file at `<workdir>/<envFile>`:
   GitHub webhook cannot reach a LAN box without a tunnel anyway).
 - Container state and ports are parsed from
   `docker compose ps --format json`; both the JSON-array and the
-  NDJSON output shapes are handled, but exotic compose versions may
-  differ.
-- Start/Stop/Restart are fire-and-forget compose calls; only deploys
-  (Update / auto-deploy / env redeploy) are recorded in the
-  deployment history.
+  NDJSON output shapes are handled, and non-JSON warning lines in
+  the output are skipped, but exotic compose versions may differ.
+  If a status check itself fails, the card shows the error and the
+  time of the last check instead of silently reporting "unknown".
+- Start/Stop/Restart are fire-and-forget compose calls; they are
+  recorded in the activity history as action records, but unlike
+  deploys they carry no per-step breakdown.
 - `.env` lines must be plain `KEY=VALUE`; `export KEY=VALUE` lines
   are not supported in v1.
 - One manager instance per host is assumed (locks and poll caches

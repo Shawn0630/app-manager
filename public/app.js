@@ -1,11 +1,18 @@
-// Dashboard logic: fetch status, render app cards + deployment
-// history, wire the action buttons. Plain JS + fetch, no framework.
-const appsEl = document.getElementById('apps');
-const historyEl = document.getElementById('history');
-const updatedEl = document.getElementById('updated');
-const logModal = document.getElementById('logModal');
-const logTitle = document.getElementById('logTitle');
-const logBody = document.getElementById('logBody');
+// App Manager dashboard. Plain fetch + innerHTML rendering, no framework.
+//
+// Refresh design (this used to be the "status never updates" bug
+// surface, so it is deliberately defensive):
+//  - apps and deployments are fetched independently; one failing
+//    must not freeze the other panel;
+//  - a render error in one card degrades to an error card for that
+//    app instead of stopping the whole grid;
+//  - polling adapts: 2 s while any app is busy, 10 s when idle, plus
+//    an immediate refresh right after an action is posted — so the
+//    busy -> done transition appears without waiting out a cycle.
+const $ = (id) => document.getElementById(id);
+const appsEl = $('apps');
+const historyEl = $('history');
+const updatedEl = $('updated');
 
 const STATE_LABEL = {
   running: 'Running',
@@ -28,6 +35,14 @@ function fmtTime(iso) {
   return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
 }
 
+function fmtClock(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function fmtDuration(ms) {
   if (ms == null) return '—';
   return `${(ms / 1000).toFixed(1)}s`;
@@ -44,48 +59,63 @@ async function api(path, opts) {
   return data;
 }
 
-function deploymentLine(dep) {
-  if (!dep) return '<span class="k">Last deploy</span> never';
+function triggerLabel(trigger) {
+  if (trigger === 'poll') return 'auto (commit)';
+  if (trigger === 'actions') return 'GitHub Actions';
+  if (trigger === 'manual-env') return 'manual (env)';
+  return 'manual';
+}
+
+function deploymentValue(dep) {
+  if (!dep) return 'never';
   const badge = dep.result === 'success'
-    ? '<span class="badge ok">success</span>'
-    : '<span class="badge fail">failed</span>';
-  const trigger = triggerLabel(dep.trigger);
-  return `<span class="k">Last deploy</span> ${esc(fmtTime(dep.ts))} · ${esc(trigger)} · ${badge} · ${esc(fmtDuration(dep.durationMs))}`;
+    ? '<span class="badge ok no-dot">success</span>'
+    : '<span class="badge fail no-dot">failed</span>';
+  return `${esc(fmtTime(dep.ts))} · ${esc(triggerLabel(dep.trigger))} · ${badge} · ${esc(fmtDuration(dep.durationMs))}`;
 }
 
-function remoteLine(a) {
+function remoteValue(a) {
   if (a.lastPollError && !a.remote) {
-    return `<span class="k">Remote</span> <span class="err">check failed: ${esc(a.lastPollError)}</span>`;
+    return `<span class="err">check failed: ${esc(a.lastPollError)}</span>`;
   }
-  if (!a.remote) return '<span class="k">Remote</span> not checked yet';
+  if (!a.remote) return 'not checked yet';
   if (a.behind) {
-    return `<span class="k">Remote</span> <span class="badge update">update available ${esc(a.remote.short)}</span>`;
+    return `<span class="badge update no-dot">update available</span> <span class="hash">${esc(a.remote.short)}</span>`;
   }
-  return `<span class="k">Remote</span> up to date (${esc(a.remote.short)})`;
+  return `up to date <span class="hash">${esc(a.remote.short)}</span>`;
 }
 
-function containersLine(a) {
+function containersHtml(a) {
   if (!a.containers || !a.containers.length) return '';
   const items = a.containers.map((c) => {
-    const ports = (c.ports || []).map((p) => `${p.published}->${p.target}/${p.protocol}`).join(', ');
-    const health = c.health ? ` · health: ${esc(c.health)}` : '';
-    return `${esc(c.name)} — ${esc(c.state)}${health}${ports ? ` · ${esc(ports)}` : ''}`;
+    const ports = (c.ports || []).map((p) =>
+      `<span class="port-chip">${esc(p.published)} → ${esc(p.target)}/${esc(p.protocol || 'tcp')}</span>`).join(' ');
+    const health = c.health && c.health !== 'none' ? `<span class="chealth">${esc(c.health)}</span>` : '';
+    return `<div class="container-row">
+      <span class="cdot ${esc(c.state)}"></span>
+      <span class="cname">${esc(c.name || c.service || '')}</span>
+      <span class="muted">${esc(c.status || c.state || '')}</span>${health}${ports}
+    </div>`;
   });
-  return `<div class="containers">${items.join('<br>')}</div>`;
+  return `<div class="containers">${items.join('')}</div>`;
 }
 
-function actionsLine(a) {
+function actionsValue(a) {
   if (a.trigger !== 'actions' && a.trigger !== 'both') return '';
   if (a.lastActionsError) {
-    return `<div><span class="k">Actions</span> <span class="err">check failed: ${esc(a.lastActionsError)}</span></div>`;
+    return `<span class="err">check failed: ${esc(a.lastActionsError)}</span>`;
   }
   const r = a.lastActionRun;
-  if (!r) return '<div><span class="k">Actions</span> no completed runs seen yet</div>';
+  if (!r) return 'no completed runs seen yet';
   const label = `${r.workflowName} · ${r.conclusion || r.status} · ${fmtTime(r.updatedAt)}`;
-  const link = r.htmlUrl
+  return r.htmlUrl
     ? `<a href="${esc(r.htmlUrl)}" target="_blank" rel="noopener">${esc(label)}</a>`
     : esc(label);
-  return `<div><span class="k">Actions</span> ${link}</div>`;
+}
+
+function statePill(a) {
+  if (a.busy) return `<span class="badge busy">${esc(`Working: ${a.busy.op}`)}</span>`;
+  return `<span class="badge ${esc(a.state)}">${esc(STATE_LABEL[a.state] || a.state)}</span>`;
 }
 
 function cardHtml(a) {
@@ -95,101 +125,176 @@ function cardHtml(a) {
     ? `<a href="http://${esc(location.hostname)}:${a.port}" target="_blank" rel="noopener">${a.port}</a>`
     : '—';
   const commitLine = a.commit
-    ? `<span class="mono">${esc(a.commit.short)}</span> ${esc(a.commit.subject || '')}`
+    ? `<span class="hash">${esc(a.commit.short)}</span> <span class="subject">${esc(a.commit.subject || '')}</span>`
     : `<span class="err">${esc(a.commitError || 'unavailable')}</span>`;
+  const btn = (action, label, cls = '') =>
+    `<button type="button" class="${cls}" data-action="${action}" data-id="${esc(a.id)}" ${disabled}>${label}</button>`;
   const buttons = [
-    ['start', 'Start'],
-    ['stop', 'Stop'],
-    ['restart', 'Restart'],
-    ['update', 'Update'],
-    ['logs', 'Logs'],
-    ['env', 'Environment'],
-    ['check', 'Check now'],
-    ['remove', 'Remove'],
-  ].map(([action, label]) => {
-    const cls = action === 'update' ? ' class="primary"' : '';
-    return `<button type="button"${cls} data-action="${action}" data-id="${esc(a.id)}" ${disabled}>${label}</button>`;
-  }).join('');
+    btn('update', 'Update', 'primary'),
+    btn('start', 'Start', 'btn-start'),
+    btn('stop', 'Stop', 'btn-danger'),
+    btn('restart', 'Restart'),
+    btn('check', 'Check now'),
+    btn('logs', 'Logs'),
+    btn('env', 'Environment'),
+    btn('remove', 'Remove', 'btn-ghost-danger'),
+  ].join('');
   return `
   <div class="card">
     <div class="card-head">
       <span class="dot ${esc(a.state)}"></span>
       <span class="name">${esc(a.name)}</span>
-      <span class="badge">${esc(STATE_LABEL[a.state] || a.state)}</span>
-      ${a.autoDeploy ? '<span class="badge auto">auto-deploy on</span>' : '<span class="badge">auto-deploy off</span>'}
-      ${a.trigger && a.trigger !== 'commit' ? `<span class="badge">trigger: ${esc(a.trigger)}</span>` : ''}
+      ${statePill(a)}
+      ${a.autoDeploy ? '<span class="badge auto no-dot">auto-deploy on</span>' : '<span class="badge no-dot">auto-deploy off</span>'}
+      ${a.trigger && a.trigger !== 'commit' ? `<span class="badge no-dot">trigger: ${esc(a.trigger)}</span>` : ''}
+      <span class="checked">checked ${esc(fmtClock(a.statusCheckedAt))}</span>
     </div>
-    ${a.warning ? `<div class="warn">⚠ ${esc(a.warning)}</div>` : ''}
+    ${a.warning ? `<div class="alert warn">⚠ ${esc(a.warning)}</div>` : ''}
+    ${a.statusError ? `<div class="alert error">Status check failed: ${esc(a.statusError)}</div>` : ''}
+    ${busy ? `<div class="busy-note"><span class="spinner"></span>Working: ${esc(busy)}…</div>` : ''}
     <div class="rows">
-      <div><span class="k">Port</span> ${portLink}</div>
-      <div><span class="k">Commit</span> ${commitLine}</div>
-      <div>${remoteLine(a)}</div>
-      ${actionsLine(a)}
-      <div>${deploymentLine(a.lastDeployment)}</div>
-      ${a.dockerError ? `<div class="err">docker: ${esc(a.dockerError)}</div>` : ''}
-      ${busy ? `<div class="busy-note">Working: ${esc(busy)}…</div>` : ''}
+      <div class="row"><span class="k">Port</span><span class="v">${portLink}</span></div>
+      <div class="row"><span class="k">Commit</span><span class="v">${commitLine}</span></div>
+      <div class="row"><span class="k">Remote</span><span class="v">${remoteValue(a)}</span></div>
+      ${actionsValue(a) ? `<div class="row"><span class="k">Actions</span><span class="v">${actionsValue(a)}</span></div>` : ''}
+      <div class="row"><span class="k">Last deploy</span><span class="v">${deploymentValue(a.lastDeployment)}</span></div>
     </div>
-    ${containersLine(a)}
+    ${containersHtml(a)}
     <div class="buttons">${buttons}</div>
   </div>`;
 }
 
-function triggerLabel(trigger) {
-  if (trigger === 'poll') return 'auto (commit)';
-  if (trigger === 'actions') return 'GitHub Actions';
-  if (trigger === 'manual-env') return 'manual (env)';
-  return 'manual';
+function errorCardHtml(a, err) {
+  return `<div class="card">
+    <div class="card-head"><span class="dot unknown"></span><span class="name">${esc(a && a.name ? a.name : 'App')}</span>
+    <span class="badge unknown">Render error</span></div>
+    <div class="alert error">This card failed to render: ${esc(err && err.message ? err.message : err)}. The rest of the dashboard keeps updating.</div>
+  </div>`;
 }
 
-function historyHtml(deployments) {
-  if (!deployments.length) return '<div class="empty">No deployments yet.</div>';
-  return deployments.map((d) => {
-    if (d.kind === 'env') {
-      const parts = [];
-      if ((d.added || []).length) parts.push(`added: ${d.added.map(esc).join(', ')}`);
-      if ((d.changed || []).length) parts.push(`changed: ${d.changed.map(esc).join(', ')}`);
-      if ((d.removed || []).length) parts.push(`removed: ${d.removed.map(esc).join(', ')}`);
-      return `
-    <div class="hist-row">
-      <span class="mono">${esc(fmtTime(d.ts))}</span> · <b>${esc(d.appId)}</b> · environment updated
-      · ${parts.length ? parts.join(' · ') : 'no changes'}
-    </div>`;
-    }
+function renderApps(apps) {
+  appsEl.innerHTML = apps.length
+    ? apps.map((a) => {
+      try {
+        return cardHtml(a);
+      } catch (e) {
+        return errorCardHtml(a, e);
+      }
+    }).join('')
+    : '<div class="empty">No apps configured.</div>';
+}
+
+function renderSummary(apps) {
+  const counts = { running: 0, stopped: 0, other: 0, busy: 0 };
+  for (const a of apps) {
+    if (a.busy) counts.busy += 1;
+    if (a.state === 'running') counts.running += 1;
+    else if (a.state === 'stopped') counts.stopped += 1;
+    else counts.other += 1;
+  }
+  $('summary').innerHTML =
+    `<span class="chip"><b>${counts.running}</b> running</span>` +
+    `<span class="chip"><b>${counts.stopped}</b> stopped</span>` +
+    (counts.other ? `<span class="chip"><b>${counts.other}</b> partial/unknown</span>` : '') +
+    (counts.busy ? `<span class="chip working"><b>${counts.busy}</b> working</span>` : '');
+}
+
+function historyRow(d) {
+  const when = esc(fmtTime(d.ts));
+  if (d.kind === 'action') {
     const badge = d.result === 'success'
-      ? '<span class="badge ok">success</span>'
-      : '<span class="badge fail">failed</span>';
-    const trigger = triggerLabel(d.trigger);
-    const runRef = d.workflowRunId != null ? ` · run #${esc(String(d.workflowRunId))}` : '';
-    const note = d.note ? `<div class="note">${esc(d.note)}</div>` : '';
-    const steps = (d.steps || []).map((s) => `
-      <div class="step">
-        <span class="mono">${esc(s.name)}</span> — ${s.ok ? 'ok' : `failed (exit ${s.code == null ? '?' : s.code})`}
-        ${s.output ? `<pre>${esc(s.output)}</pre>` : ''}
-      </div>`).join('');
+      ? '<span class="badge ok no-dot">success</span>'
+      : '<span class="badge fail no-dot">failed</span>';
     return `
-    <div class="hist-row">
-      <span class="mono">${esc(fmtTime(d.ts))}</span> · <b>${esc(d.appId)}</b> · ${esc(trigger)}${runRef} · ${badge}
-      · <span class="mono">${esc(shortHash(d.fromCommit))} → ${esc(shortHash(d.toCommit))}</span>
-      · ${esc(fmtDuration(d.durationMs))}
-      ${note}
-      ${steps ? `<details><summary>Steps (${d.steps.length})</summary>${steps}</details>` : ''}
+    <div class="hist-row kind-action">
+      <span class="when">${when}</span> · <span class="app-name">${esc(d.appId)}</span>
+      <span class="badge kind-action no-dot">Action</span> <b>${esc(d.action)}</b> · ${badge} · ${esc(fmtDuration(d.durationMs))}
+      ${d.output ? `<details><summary>Output</summary><pre class="output">${esc(d.output)}</pre></details>` : ''}
     </div>`;
-  }).join('');
+  }
+  if (d.kind === 'env') {
+    const parts = [];
+    if ((d.added || []).length) parts.push(`added: ${d.added.map(esc).join(', ')}`);
+    if ((d.changed || []).length) parts.push(`changed: ${d.changed.map(esc).join(', ')}`);
+    if ((d.removed || []).length) parts.push(`removed: ${d.removed.map(esc).join(', ')}`);
+    const result = d.result
+      ? ` · ${d.result === 'success'
+        ? '<span class="badge ok no-dot">success</span>'
+        : '<span class="badge fail no-dot">failed</span>'}`
+      : '';
+    const what = d.trigger === 'manual-env' ? 'redeployed after environment update' : 'environment updated';
+    return `
+    <div class="hist-row kind-env">
+      <span class="when">${when}</span> · <span class="app-name">${esc(d.appId)}</span>
+      <span class="badge kind-env no-dot">Env</span> ${what}${result}
+      ${parts.length ? ` · ${parts.join(' · ')}` : ''}
+    </div>`;
+  }
+  const badge = d.result === 'success'
+    ? '<span class="badge ok no-dot">success</span>'
+    : '<span class="badge fail no-dot">failed</span>';
+  const runRef = d.workflowRunId != null ? ` · run #${esc(String(d.workflowRunId))}` : '';
+  const note = d.note ? `<div class="note">${esc(d.note)}</div>` : '';
+  const steps = (d.steps || []).map((s) => `
+    <div class="step">
+      <span class="badge ${s.ok ? 'ok' : 'fail'} no-dot">${s.ok ? 'ok' : `failed (exit ${s.code == null ? '?' : s.code})`}</span>
+      <b>${esc(s.name)}</b> <span class="note">${esc(fmtDuration(s.durationMs))}</span>
+      ${s.output ? `<pre>${esc(s.output)}</pre>` : ''}
+    </div>`).join('');
+  return `
+  <div class="hist-row kind-deploy">
+    <span class="when">${when}</span> · <span class="app-name">${esc(d.appId)}</span>
+    <span class="badge kind-deploy no-dot">Deploy</span> ${esc(triggerLabel(d.trigger))}${runRef} · ${badge}
+    · <span class="hash">${esc(shortHash(d.fromCommit))} → ${esc(shortHash(d.toCommit))}</span>
+    · ${esc(fmtDuration(d.durationMs))}
+    ${note}
+    ${steps ? `<details><summary>Steps (${d.steps.length})</summary>${steps}</details>` : ''}
+  </div>`;
+}
+
+function renderHistory(deployments) {
+  historyEl.innerHTML = deployments.length
+    ? `<div class="hist-list">${deployments.map(historyRow).join('')}</div>`
+    : '<div class="empty">No activity yet.</div>';
+}
+
+let pollTimer = null;
+let refreshInFlight = false;
+
+function schedulePoll(ms) {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(refresh, ms);
 }
 
 async function refresh() {
+  if (refreshInFlight) {
+    schedulePoll(1000);
+    return;
+  }
+  refreshInFlight = true;
   try {
-    const [{ apps }, { deployments }] = await Promise.all([
+    const [appsRes, depsRes] = await Promise.allSettled([
       api('/api/apps'),
-      api('/api/deployments?limit=20'),
+      api('/api/deployments?limit=30'),
     ]);
-    appsEl.innerHTML = apps.length
-      ? apps.map(cardHtml).join('')
-      : '<div class="empty">No apps configured.</div>';
-    historyEl.innerHTML = historyHtml(deployments);
-    updatedEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-  } catch (e) {
-    updatedEl.textContent = `Refresh failed: ${e.message}`;
+    let anyBusy = false;
+    if (appsRes.status === 'fulfilled') {
+      const apps = appsRes.value.apps || [];
+      anyBusy = apps.some((a) => a.busy);
+      renderSummary(apps);
+      renderApps(apps);
+    }
+    if (depsRes.status === 'fulfilled') {
+      renderHistory(depsRes.value.deployments || []);
+    }
+    if (appsRes.status === 'fulfilled' || depsRes.status === 'fulfilled') {
+      updatedEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    } else {
+      updatedEl.textContent = `Refresh failed: ${appsRes.reason ? appsRes.reason.message : 'unknown error'}`;
+    }
+    schedulePoll(anyBusy ? 2000 : 10000);
+  } finally {
+    refreshInFlight = false;
   }
 }
 
@@ -209,14 +314,15 @@ async function doAction(id, action) {
     return;
   }
   if (action === 'logs') {
-    logTitle.textContent = `Logs — ${id}`;
-    logBody.textContent = 'Loading…';
+    const logModal = $('logModal');
+    $('logTitle').textContent = `Logs — ${id}`;
+    $('logBody').textContent = 'Loading…';
     logModal.classList.remove('hidden');
     try {
       const { logs } = await api(`/api/apps/${encodeURIComponent(id)}/logs?tail=200`);
-      logBody.textContent = logs || '(no logs)';
+      $('logBody').textContent = logs || '(no logs)';
     } catch (e) {
-      logBody.textContent = `Failed to load logs: ${e.message}`;
+      $('logBody').textContent = `Failed to load logs: ${e.message}`;
     }
     return;
   }
@@ -225,7 +331,9 @@ async function doAction(id, action) {
   } catch (e) {
     alert(e.message);
   }
-  setTimeout(refresh, 600);
+  // Refresh immediately (the busy state shows at once); the adaptive
+  // poller then tracks the operation until it completes.
+  refresh();
 }
 
 appsEl.addEventListener('click', (ev) => {
@@ -233,14 +341,13 @@ appsEl.addEventListener('click', (ev) => {
   if (!btn || btn.disabled) return;
   doAction(btn.dataset.id, btn.dataset.action);
 });
-document.getElementById('refreshBtn').addEventListener('click', refresh);
-document.getElementById('logClose').addEventListener('click', () => logModal.classList.add('hidden'));
-logModal.addEventListener('click', (ev) => {
-  if (ev.target === logModal) logModal.classList.add('hidden');
+$('refreshBtn').addEventListener('click', refresh);
+$('logClose').addEventListener('click', () => $('logModal').classList.add('hidden'));
+$('logModal').addEventListener('click', (ev) => {
+  if (ev.target === $('logModal')) $('logModal').classList.add('hidden');
 });
 
 refresh();
-setInterval(refresh, 10_000);
 
 // ---------- Environment (.env) editor ----------
 // Two modes over one document:

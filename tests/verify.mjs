@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseComposePs } from '../src/docker.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORK = path.join(ROOT, 'tests', '.work');
@@ -194,7 +195,7 @@ async function main() {
     check('POST update -> 202', r.status === 202, r.status);
     const dep = await waitFor('manual deployment record', async () => {
       const x = await api('GET', '/api/deployments?limit=5');
-      return x.json.deployments.find((d) => d.appId === 'test-app' && d.trigger === 'manual');
+      return x.json.deployments.find((d) => d.appId === 'test-app' && d.kind === 'deploy' && d.trigger === 'manual');
     }, 60_000);
     check('manual deployment succeeded', dep.result === 'success', dep.result);
     check('deployment fromCommit = v1', dep.fromCommit === v1, dep.fromCommit);
@@ -542,6 +543,94 @@ async function main() {
   } finally {
     await stopManager(mgr);
     mockServer.close();
+  }
+
+  // ---- Phase 6: action journal + real-format ps parsing ----
+  // Parser-level tolerance for the real Compose v2 output shapes:
+  // pretty/compact arrays, NDJSON, and human warning lines mixed
+  // into stdout (the case that used to collapse the parse).
+  {
+    const realC = {
+      ID: 'abc123', Name: 'p-web-1', Image: 'nginx:alpine', Project: 'p', Service: 'web',
+      State: 'running', Status: 'Up 2 minutes', Health: 'healthy', ExitCode: 0,
+      Publishers: [{ URL: '0.0.0.0', TargetPort: 80, PublishedPort: 8088, Protocol: 'tcp' }],
+    };
+    const warn = 'time="2026-10-24T19:58:12Z" level=warning msg="the attribute `version` is obsolete"';
+    check('parser: pretty-printed JSON array',
+      parseComposePs(JSON.stringify([realC], null, 2)).length === 1);
+    check('parser: warning line + compact array on one line',
+      parseComposePs(`${warn}\n${JSON.stringify([realC])}`).length === 1);
+    check('parser: NDJSON with a warning line',
+      parseComposePs(`${warn}\n${JSON.stringify(realC)}\n${JSON.stringify({ ...realC, Name: 'p-db-1' })}`).length === 2);
+    const oneLine = parseComposePs(`${warn}\n${JSON.stringify(realC)}`);
+    check('parser: single NDJSON object is not mistaken for its Publishers array',
+      oneLine.length === 1 && oneLine[0].Name === 'p-web-1', oneLine.map((c) => c.Name));
+    check('parser: pure garbage -> empty list', parseComposePs('not json at all\n{broken').length === 0);
+    check('parser: empty output -> empty list', parseComposePs('').length === 0);
+  }
+
+  // End to end with the fake docker emitting the older NDJSON
+  // shape AND a warning line: status must still parse, and
+  // start/stop must land in the activity journal.
+  const psCfg = path.join(WORK, 'apps.manual.json');
+  mgr = startManager({
+    configPath: psCfg,
+    dataDir,
+    extraEnv: { FAKE_DOCKER_PS_FORMAT: 'ndjson', FAKE_DOCKER_PS_WARN: '1' },
+  });
+  try {
+    await waitHealth();
+    let a = await getApp();
+    check('status carries statusError + statusCheckedAt',
+      a.statusError === null && typeof a.statusCheckedAt === 'string', a.statusError);
+    const stopRes = await api('POST', '/api/apps/test-app/stop');
+    check('POST stop -> 202 (ndjson phase)', stopRes.status === 202, stopRes.status);
+    await waitFor('busy cleared after stop', async () => (await getApp()).busy === null);
+    a = await getApp();
+    check('state stopped, parsed from NDJSON + warning line', a.state === 'stopped', a.state);
+    const stopRec = await waitFor('stop action record', async () => {
+      const x = await api('GET', '/api/deployments?limit=100');
+      return x.json.deployments.find((d) => d.appId === 'test-app' && d.kind === 'action' && d.action === 'stop');
+    });
+    check('stop recorded as kind=action, success',
+      stopRec.result === 'success' && typeof stopRec.durationMs === 'number', stopRec);
+
+    const startRes = await api('POST', '/api/apps/test-app/start');
+    check('POST start -> 202 (ndjson phase)', startRes.status === 202, startRes.status);
+    await waitFor('running after start (ndjson)', async () => (await getApp()).state === 'running');
+    a = await getApp();
+    check('running with port 8088 parsed from NDJSON + warning line',
+      a.containers.length === 1 && a.containers[0].state === 'running'
+        && a.containers[0].ports.some((p) => p.published === 8088),
+      a.containers);
+    const startRec = await waitFor('start action record', async () => {
+      const x = await api('GET', '/api/deployments?limit=100');
+      return x.json.deployments.find((d) => d.appId === 'test-app' && d.kind === 'action' && d.action === 'start');
+    });
+    check('start recorded as kind=action, success', startRec.result === 'success', startRec.result);
+    check('lastDeployment ignores action records',
+      a.lastDeployment === null || a.lastDeployment.kind === 'deploy',
+      a.lastDeployment && a.lastDeployment.kind);
+  } finally {
+    await stopManager(mgr);
+  }
+
+  // Same end-to-end status parse with the newer array shape + a
+  // leading warning line on stdout.
+  mgr = startManager({
+    configPath: psCfg,
+    dataDir,
+    extraEnv: { FAKE_DOCKER_PS_FORMAT: 'json', FAKE_DOCKER_PS_WARN: '1' },
+  });
+  try {
+    await waitHealth();
+    const a = await getApp();
+    check('array shape + warning line still parses to running + port',
+      a.state === 'running' && a.containers.length === 1
+        && a.containers[0].ports.some((p) => p.published === 8088),
+      { state: a.state, containers: a.containers });
+  } finally {
+    await stopManager(mgr);
   }
 
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
