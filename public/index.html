@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>App Manager</h1>
+  <div class="header-right">
+    <span id="updated" class="muted"></span>
+    <button id="refreshBtn" type="button">Refresh</button>
+  </div>
+</header>
+<main>
+  <section class="addapp">
+    <h2>Add App</h2>
+    <form id="addForm">
+      <input name="repoUrl" type="text" placeholder="Repo URL (https://github.com/owner/repo)" required>
+      <input name="name" type="text" placeholder="Name (default: repo name)">
+      <input name="branch" type="text" placeholder="Branch (main)">
+      <input name="port" type="number" min="1" max="65535" placeholder="Port">
+      <select name="trigger">
+        <option value="commit">Trigger: commits</option>
+        <option value="actions">Trigger: GitHub Actions</option>
+        <option value="both">Trigger: both</option>
+        <option value="manual">Trigger: manual only</option>
+      </select>
+      <input name="workflow" type="text" placeholder="Workflow (optional, Actions)">
+      <label class="check"><input type="checkbox" name="autoDeploy"> Auto-deploy</label>
+      <button type="submit" class="primary">Add App</button>
+      <span id="addMsg" class="muted"></span>
+    </form>
+  </section>
+  <section id="apps" class="grid"></section>
+  <section class="history">
+    <h2>Deployment History</h2>
+    <div id="history"></div>
+  </section>
+</main>
+<div id="logModal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="logTitle">Logs</span>
+      <button id="logClose" type="button">Close</button>
+    </div>
+    <pre id="logBody"></pre>
+  </div>
+</div>
+<div id="envModal" class="modal hidden">
+  <div class="modal-box env-box">
+    <div class="modal-head">
+      <span id="envTitle">Environment</span>
+      <button id="envClose" type="button">Close</button>
+    </div>
+    <div class="env-toolbar">
+      <div>
+        <button id="envModeTable" type="button">Table</button>
+        <button id="envModeRaw" type="button">Raw</button>
+      </div>
+      <label class="env-show"><input type="checkbox" id="envShowValues"> Show values</label>
+      <span id="envNote" class="muted"></span>
+    </div>
+    <div id="envTableWrap">
+      <table class="env-table">
+        <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+        <tbody id="envRows"></tbody>
+      </table>
+      <button id="envAddRow" type="button">Add variable</button>
+    </div>
+    <textarea id="envRaw" class="hidden" spellcheck="false"></textarea>
+    <div class="env-actions">
+      <span id="envMsg" class="muted"></span>
+      <button id="envSave" type="button">Save</button>
+      <button id="envSaveRedeploy" type="button" class="primary">Save &amp; Redeploy</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

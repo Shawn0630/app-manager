@@ -1,0 +1,1 @@
+{"dependencies":{"express":"^4.19.2"},"description":"LAN Docker app manager: watches GitHub commits and auto-deploys, dashboard for status/ports/commits/deployments, manual start/stop/restart/update","engines":{"node":">=20"},"name":"app-manager","private":true,"scripts":{"start":"node src/server.js","test:e2e":"node tests/verify.mjs"},"type":"module","version":"1.0.0"}

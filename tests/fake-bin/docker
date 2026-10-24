@@ -1,0 +1,139 @@
+#!/usr/bin/env node
+// Fake `docker` CLI for machines without a Docker daemon (like the
+// dev VM). Implements just the compose subcommands app-manager uses:
+//   docker compose -p <project> -f <file> ps --format json
+//   docker compose -p <project> -f <file> up -d [--build]
+//   docker compose -p <project> -f <file> stop
+//   docker compose -p <project> -f <file> restart
+//   docker compose -p <project> -f <file> down
+//   docker compose -p <project> -f <file> logs --no-color --tail <n>
+// Container state lives in a JSON file so `ps` reflects earlier
+// up/stop calls; every invocation is appended to a calls log.
+// Env:
+//   FAKE_DOCKER_STATE  state file path
+//   FAKE_DOCKER_CALLS  calls log path
+//   FAKE_DOCKER_PORT   published port for the fake container (8088)
+//   FAKE_DOCKER_DELAY_MS  artificial delay for `up` (busy-lock tests)
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const statePath = process.env.FAKE_DOCKER_STATE
+  || path.join(process.cwd(), 'tests/.work/fake-docker-state.json');
+const callsPath = process.env.FAKE_DOCKER_CALLS
+  || path.join(process.cwd(), 'tests/.work/fake-docker-calls.log');
+const publishedPort = Number(process.env.FAKE_DOCKER_PORT) || 8088;
+
+fs.mkdirSync(path.dirname(callsPath), { recursive: true });
+fs.appendFileSync(callsPath, `${JSON.stringify(process.argv.slice(2))}\n`);
+
+function loadState() {
+  try {
+    return JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+function saveState(s) {
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify(s, null, 1));
+}
+
+const args = process.argv.slice(2);
+if (args[0] === '--version' || args[0] === 'version') {
+  console.log('Docker version 24.0.0-fake');
+  process.exit(0);
+}
+if (args[0] !== 'compose') {
+  console.error(`fake docker: unsupported command: ${args.join(' ')}`);
+  process.exit(1);
+}
+
+// Parse compose global flags: -p/--project-name, -f/--file
+let project = 'default';
+let i = 1;
+while (i < args.length) {
+  const a = args[i];
+  if (a === '-p' || a === '--project-name') {
+    project = args[i + 1];
+    i += 2;
+  } else if (a === '-f' || a === '--file') {
+    i += 2;
+  } else break;
+}
+const sub = args[i];
+const rest = args.slice(i + 1);
+
+const state = loadState();
+const entry = state[project] || { containers: [] };
+state[project] = entry;
+
+function ensureContainer() {
+  if (!entry.containers.length) {
+    entry.containers = [{
+      Name: `${project}-web-1`,
+      Service: 'web',
+      State: 'running',
+      Status: 'Up 1 second',
+      Health: 'healthy',
+      Publishers: [{
+        URL: '0.0.0.0',
+        TargetPort: publishedPort,
+        PublishedPort: publishedPort,
+        Protocol: 'tcp',
+      }],
+    }];
+  }
+}
+
+switch (sub) {
+  case 'ps':
+    process.stdout.write(`${JSON.stringify(entry.containers)}\n`);
+    break;
+  case 'up': {
+    const delayMs = Number(process.env.FAKE_DOCKER_DELAY_MS) || 0;
+    if (delayMs > 0) spawnSync('sleep', [String(delayMs / 1000)]);
+    ensureContainer();
+    for (const c of entry.containers) {
+      c.State = 'running';
+      c.Status = 'Up 1 second';
+    }
+    saveState(state);
+    console.log(`Container ${project}-web-1 Running`);
+    break;
+  }
+  case 'stop':
+    for (const c of entry.containers) {
+      c.State = 'exited';
+      c.Status = 'Exited (0) 1 second ago';
+    }
+    saveState(state);
+    console.log(`Container ${project}-web-1 Stopped`);
+    break;
+  case 'restart':
+    ensureContainer();
+    for (const c of entry.containers) {
+      c.State = 'running';
+      c.Status = 'Up 1 second';
+    }
+    saveState(state);
+    console.log(`Container ${project}-web-1 Restarted`);
+    break;
+  case 'down':
+    entry.containers = [];
+    saveState(state);
+    break;
+  case 'logs': {
+    const tailIdx = rest.indexOf('--tail');
+    const n = tailIdx >= 0 ? Number(rest[tailIdx + 1]) || 200 : 200;
+    const lines = [];
+    for (let k = 1; k <= Math.min(n, 5); k += 1) {
+      lines.push(`web-1  | fake log line ${k} for project ${project}`);
+    }
+    process.stdout.write(`${lines.join('\n')}\n`);
+    break;
+  }
+  default:
+    console.error(`fake docker: unsupported compose subcommand: ${sub}`);
+    process.exit(1);
+}

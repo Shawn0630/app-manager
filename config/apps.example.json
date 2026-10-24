@@ -1,0 +1,34 @@
+{
+ "apps": [
+  {
+   "autoDeploy": false,
+   "branch": "main",
+   "composeFile": "docker-compose.yml",
+   "id": "algorithm-visualizer",
+   "name": "Algorithm Visualizer",
+   "pollIntervalSec": 120,
+   "port": 8088,
+   "projectName": "algorithm-visualizer",
+   "provider": "builtin",
+   "repoUrl": "https://github.com/Shawn0630/project_algorithm_visualizer",
+   "workdir": "/home/you/apps/project_algorithm_visualizer",
+   "envFile": ".env",
+   "trigger": "commit"
+  },
+  {
+   "autoDeploy": false,
+   "branch": "main",
+   "composeFile": "docker-compose.yml",
+   "id": "demo",
+   "name": "Demo App",
+   "pollIntervalSec": 120,
+   "port": 3000,
+   "projectName": "demo",
+   "provider": "builtin",
+   "repoUrl": "https://github.com/example/demo.git",
+   "workdir": "/home/you/apps/demo",
+   "envFile": ".env",
+   "trigger": "commit"
+  }
+ ]
+}

@@ -1,0 +1,7 @@
+node_modules/
+data/*.jsonl
+data/backups/
+tests/.work/
+tests/.work-shot/
+*.log
+.DS_Store

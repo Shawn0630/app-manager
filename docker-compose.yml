@@ -1,0 +1,37 @@
+# The app-manager itself. Build and run on the machine whose Docker
+# apps you want to manage (Mac for development, the Linux box for real).
+services:
+  app-manager:
+    build: .
+    image: app-manager
+    container_name: app-manager
+    ports:
+      - "9000:9000"
+    environment:
+      # Set a real password before exposing the dashboard on the LAN —
+      # it can start/stop containers and edit .env files.
+      MANAGER_USER: admin
+      MANAGER_PASSWORD: "change-me"
+      # Optional: needed to watch private repos' GitHub Actions (and
+      # raises the API rate limit for public ones). See README.
+      # GITHUB_TOKEN: "ghp_..."
+    volumes:
+      # The manager drives the HOST Docker daemon through this socket.
+      # (This is effectively root access to the host — see README.)
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Live app registry and deployment data (deployments.jsonl +
+      # .env backups + trigger state). The registry is READ-WRITE:
+      # the Add App / Remove actions rewrite apps.json from the UI.
+      - ./config:/app/config
+      - ./data:/app/data
+      # Where Add App clones new repos (APPS_ROOT, default /app/apps).
+      - ./apps:/app/apps
+      # Managed apps' workdirs MUST be mounted at the SAME absolute
+      # path as on the host. The manager passes -f <workdir>/<composeFile>
+      # and runs git inside <workdir>; the Docker daemon (over the
+      # socket) also resolves the compose file's bind mounts and
+      # relative paths on the host filesystem. If the paths differ
+      # inside the container, git works on the wrong tree and the
+      # daemon looks for files that do not exist. Example:
+      # - /home/you/apps:/home/you/apps
+    restart: unless-stopped
