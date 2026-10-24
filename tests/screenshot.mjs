@@ -77,6 +77,15 @@ async function api(method, p) {
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 
+async function apiJson(method, p, body) {
+  const res = await fetch(REAL + p, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, json: await res.json().catch(() => null) };
+}
+
 async function main() {
   fs.rmSync(WORK, { recursive: true, force: true });
   fs.mkdirSync(WORK, { recursive: true });
@@ -165,6 +174,13 @@ async function main() {
       if (a && a.state === 'running' && !a.busy) break;
       await sleep(300);
     }
+    // Save a dynamic layer: DEBUG overrides the static value,
+    // EXTRA_FLAG exists only dynamically. The update below then
+    // deploys WITH the overrides, so the Activity row gains tags and
+    // a dynamic-keys line, and the env panel's "Currently in use"
+    // section shows the merged result.
+    const dyn = await apiJson('PUT', '/api/apps/demo-app/env/dynamic', { text: 'DEBUG=true\nEXTRA_FLAG=from-dynamic\n' });
+    if (dyn.status !== 200) throw new Error(`dynamic save failed: HTTP ${dyn.status}`);
     const upd = await api('POST', '/api/apps/demo-app/update');
     if (upd.status !== 202) throw new Error(`update not accepted: HTTP ${upd.status}`);
     let depOk = false;
@@ -197,13 +213,14 @@ async function main() {
     await page.screenshot({ path: path.join(WORK, 'dashboard.png'), fullPage: true });
     console.log('saved dashboard.png');
 
-    // Open the Environment editor and screenshot it (table mode,
-    // values masked by default).
+    // Open the Environment editor and screenshot it (all three
+    // sections populated, values masked by default).
     await page.evaluate(() => {
       const btn = [...document.querySelectorAll('button[data-action="env"]')][0];
       if (btn) btn.click();
     });
-    await page.waitForSelector('#envModal:not(.hidden) .env-table tbody tr', { timeout: 20_000 });
+    await page.waitForSelector('#envModal:not(.hidden) #inUseRows tr', { timeout: 20_000 });
+    await page.waitForSelector('#envModal:not(.hidden) #dynRows tr', { timeout: 20_000 });
     await sleep(600);
     await page.screenshot({ path: path.join(WORK, 'dashboard-env.png') });
     console.log('saved dashboard-env.png');

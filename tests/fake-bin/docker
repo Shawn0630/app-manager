@@ -19,6 +19,7 @@
 //     like older Compose v2)
 //   FAKE_DOCKER_PS_WARN '1' to print a human warning line on stdout
 //     before the ps payload, like real compose/Desktop sometimes do
+//   FAKE_DOCKER_FAIL_UP '1' to make `up` exit 1 (failed-deploy tests)
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -106,6 +107,15 @@ function ensureContainer() {
 }
 
 switch (sub) {
+  case 'config': {
+    // `docker compose config --services`: one service name per line.
+    if (rest.includes('--services')) {
+      process.stdout.write('web\n');
+    } else {
+      process.stdout.write('services:\n  web:\n    image: nginx:alpine\n');
+    }
+    break;
+  }
   case 'ps': {
     let payload;
     if ((process.env.FAKE_DOCKER_PS_FORMAT || 'json') === 'ndjson') {
@@ -121,6 +131,10 @@ switch (sub) {
     break;
   }
   case 'up': {
+    if (process.env.FAKE_DOCKER_FAIL_UP === '1') {
+      console.error('fake docker: simulated compose up failure');
+      process.exit(1);
+    }
     const delayMs = Number(process.env.FAKE_DOCKER_DELAY_MS) || 0;
     if (delayMs > 0) spawnSync('sleep', [String(delayMs / 1000)]);
     ensureContainer();

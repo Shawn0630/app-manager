@@ -12,6 +12,8 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseComposePs } from '../src/docker.js';
+import { tagsForRecord, failedStepOf } from '../src/activity.js';
+import { mergeEnvEntries } from '../src/dynenv.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORK = path.join(ROOT, 'tests', '.work');
@@ -629,6 +631,197 @@ async function main() {
       a.state === 'running' && a.containers.length === 1
         && a.containers[0].ports.some((p) => p.published === 8088),
       { state: a.state, containers: a.containers });
+  } finally {
+    await stopManager(mgr);
+  }
+
+  // ---- Phase 7: activity tags + dynamic env layer + in-use view ----
+  // Tag mapping unit checks (synthetic records for every trigger
+  // kind, so poll/actions/manual-env are covered without another
+  // manager phase).
+  {
+    const tagOf = (rec, type) => (tagsForRecord(rec).find((t) => t.type === type) || {}).label;
+    check('tags: poll deploy -> Auto · Commit trigger',
+      tagOf({ kind: 'deploy', trigger: 'poll', result: 'success', steps: [] }, 'trigger') === 'Auto · Commit');
+    check('tags: actions deploy -> GitHub Actions + Update',
+      tagOf({ kind: 'deploy', trigger: 'actions', result: 'success', steps: [] }, 'trigger') === 'GitHub Actions'
+        && tagOf({ kind: 'deploy', trigger: 'actions', result: 'success', steps: [] }, 'action') === 'Update');
+    check('tags: manual-env deploy -> Redeploy action',
+      tagOf({ kind: 'deploy', trigger: 'manual-env', result: 'success', steps: [] }, 'action') === 'Redeploy');
+    check('tags: action record -> capitalized action name + result',
+      tagOf({ kind: 'action', action: 'restart', trigger: 'manual', result: 'success' }, 'action') === 'Restart'
+        && tagOf({ kind: 'action', action: 'restart', trigger: 'manual', result: 'success' }, 'result') === 'Success');
+    check('tags: env records name their layer',
+      tagOf({ kind: 'env', layer: 'dynamic', trigger: 'manual' }, 'action') === 'Dynamic env save'
+        && tagOf({ kind: 'env', layer: 'static', trigger: 'manual' }, 'action') === 'Static env save'
+        && tagOf({ kind: 'env', trigger: 'manual' }, 'action') === 'Env save');
+    const failedRec = {
+      kind: 'deploy', trigger: 'manual', result: 'failed',
+      steps: [{ name: 'git fetch', ok: true }, { name: 'docker compose up -d --build', ok: false }],
+    };
+    check('tags: failed deploy names the failed step',
+      failedStepOf(failedRec) === 'docker compose up -d --build'
+        && tagOf(failedRec, 'failedStep') === 'failed at: docker compose up -d --build'
+        && tagOf(failedRec, 'result') === 'Failed');
+    const merged = mergeEnvEntries(
+      [{ key: 'FOO', value: 's1' }, { key: 'BAR', value: 's2' }],
+      [{ key: 'FOO', value: 'd1' }, { key: 'NEW', value: 'd2' }],
+    );
+    check('merge: dynamic wins, order static-then-dynamic-only, overridden flagged',
+      merged.entries.length === 3
+        && merged.entries[0].source === 'dynamic' && merged.entries[0].value === 'd1' && merged.entries[0].overridden === true
+        && merged.entries[1].source === 'static'
+        && merged.entries[2].key === 'NEW' && merged.entries[2].source === 'dynamic'
+        && JSON.stringify(merged.overriddenKeys) === '["FOO"]',
+      merged);
+  }
+
+  // End to end: save a dynamic layer, deploy, and confirm the
+  // override really reaches the compose invocation, the journal
+  // stays value-free, the static file is untouched, and the
+  // "currently in use" view reports the merge (persistently).
+  const staticText = 'FOO=static-foo\nBAR=keep\n';
+  fs.writeFileSync(path.join(workdir, '.env'), staticText);
+  const putJson = async (p, body) => {
+    const res = await fetch(BASE + p, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, json: await res.json().catch(() => null) };
+  };
+  mgr = startManager({ configPath: psCfg, dataDir });
+  try {
+    await waitHealth();
+    let r = await api('GET', '/api/apps/test-app/env/dynamic');
+    check('GET dynamic: nothing saved yet',
+      r.status === 200 && r.json.exists === false && r.json.entries.length === 0, r.json);
+    r = await api('GET', '/api/apps/test-app/env/current');
+    check('current before any dynamic deploy: not applied, static-only note',
+      r.status === 200 && r.json.applied === false
+        && typeof r.json.note === 'string' && r.json.note.includes('Static values only'),
+      r.json && { applied: r.json.applied, note: r.json.note });
+    const fooEntry = (r.json.entries || []).find((e) => e.key === 'FOO');
+    check('current before: FOO from the static layer',
+      Boolean(fooEntry) && fooEntry.source === 'static' && fooEntry.value === 'static-foo', fooEntry);
+
+    const putDyn = await putJson('/api/apps/test-app/env/dynamic', { text: 'FOO=dynamic-foo\nDYNONLY=dynamic-secret\n' });
+    check('PUT dynamic -> 200 with key-name diff',
+      putDyn.status === 200 && putDyn.json.ok === true
+        && JSON.stringify(putDyn.json.added) === '["FOO","DYNONLY"]', putDyn.json);
+    r = await api('GET', '/api/apps/test-app/env/dynamic');
+    check('GET dynamic returns the saved entries',
+      r.json.exists === true && r.json.entries.length === 2 && r.json.entries[0].key === 'FOO', r.json);
+    const badDyn = await putJson('/api/apps/test-app/env/dynamic', { text: 'NOT VALID LINE\n' });
+    check('PUT dynamic invalid line -> 400', badDyn.status === 400, badDyn.status);
+
+    const journal1 = fs.readFileSync(path.join(dataDir, 'deployments.jsonl'), 'utf8');
+    const dynRecord = journal1.split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      .find((d) => d.kind === 'env' && d.layer === 'dynamic');
+    check('dynamic save journaled as kind=env layer=dynamic (key names)',
+      Boolean(dynRecord) && JSON.stringify(dynRecord.added) === '["FOO","DYNONLY"]', dynRecord);
+    check('journal records the static layer too',
+      journal1.split('\n').filter(Boolean).map((l) => JSON.parse(l))
+        .some((d) => d.kind === 'env' && d.layer === 'static'));
+    check('no dynamic VALUES anywhere in deployments.jsonl',
+      !journal1.includes('dynamic-foo') && !journal1.includes('dynamic-secret'));
+
+    const callsMark = fs.readFileSync(path.join(WORK, 'fake-calls.log'), 'utf8').length;
+    const upd = await api('POST', '/api/apps/test-app/update');
+    check('POST update -> 202 (dynamic phase)', upd.status === 202, upd.status);
+    const dynDep = await waitFor('deployment with dynamic overrides', async () => {
+      const x = await api('GET', '/api/deployments?limit=100');
+      return x.json.deployments.find(
+        (d) => d.appId === 'test-app' && d.kind === 'deploy' && d.trigger === 'manual' && Array.isArray(d.dynamicKeys) && d.dynamicKeys.length === 2,
+      );
+    }, 60_000);
+    check('deployment succeeded with dynamicKeys recorded (names only)',
+      dynDep.result === 'success' && JSON.stringify(dynDep.dynamicKeys) === '["FOO","DYNONLY"]',
+      { result: dynDep.result, dynamicKeys: dynDep.dynamicKeys });
+    check('deployment has an ok "apply dynamic env" step',
+      dynDep.steps.some((s) => s.name === 'apply dynamic env' && s.ok),
+      dynDep.steps.map((s) => s.name));
+    const depTags = Object.fromEntries((dynDep.tags || []).map((t) => [t.type, t.label]));
+    check('deployment tags: Deploy / Update / Manual / Success',
+      depTags.kind === 'Deploy' && depTags.action === 'Update'
+        && depTags.trigger === 'Manual' && depTags.result === 'Success' && dynDep.failedStep === null,
+      dynDep.tags);
+    const newCalls = fs.readFileSync(path.join(WORK, 'fake-calls.log'), 'utf8').slice(callsMark);
+    check('compose was asked for its services (config --services)',
+      newCalls.includes('"config","--services"'));
+    check('the up call carried the generated override file',
+      newCalls.split('\n').some((l) => l.includes('"up"') && l.includes('docker-compose.manager.json')),
+      newCalls.trim().split('\n').slice(-4));
+    const overrideFile = path.join(dataDir, 'overrides', 'test-app', 'docker-compose.manager.json');
+    const overrideDoc = JSON.parse(fs.readFileSync(overrideFile, 'utf8'));
+    check('override file sets the dynamic values on the web service',
+      overrideDoc.services.web.environment.FOO === 'dynamic-foo'
+        && overrideDoc.services.web.environment.DYNONLY === 'dynamic-secret',
+      overrideDoc.services.web.environment);
+    check('static .env file untouched by the deployment',
+      fs.readFileSync(path.join(workdir, '.env'), 'utf8') === staticText);
+
+    r = await api('GET', '/api/apps/test-app/env/current');
+    check('current after deploy: applied, with deployment stamp',
+      r.json.applied === true && typeof r.json.deployedAt === 'string' && r.json.trigger === 'manual',
+      { applied: r.json.applied, deployedAt: r.json.deployedAt });
+    const byKey = Object.fromEntries((r.json.entries || []).map((e) => [e.key, e]));
+    check('current after: FOO is dynamic, wins over static, flagged overridden',
+      Boolean(byKey.FOO) && byKey.FOO.source === 'dynamic' && byKey.FOO.value === 'dynamic-foo' && byKey.FOO.overridden === true,
+      byKey.FOO);
+    check('current after: BAR stays static, DYNONLY is dynamic-only',
+      Boolean(byKey.BAR) && byKey.BAR.source === 'static' && byKey.BAR.value === 'keep'
+        && Boolean(byKey.DYNONLY) && byKey.DYNONLY.source === 'dynamic' && byKey.DYNONLY.overridden === false,
+      { BAR: byKey.BAR, DYNONLY: byKey.DYNONLY });
+    check('current after: overriddenKeys lists FOO',
+      JSON.stringify(r.json.overriddenKeys) === '["FOO"]', r.json.overriddenKeys);
+
+    // Start/Restart must NOT re-apply dynamic overrides: the calls
+    // for a restart carry no override file.
+    const restartMark = fs.readFileSync(path.join(WORK, 'fake-calls.log'), 'utf8').length;
+    await api('POST', '/api/apps/test-app/restart');
+    await waitFor('busy cleared after restart', async () => (await getApp()).busy === null);
+    const restartCalls = fs.readFileSync(path.join(WORK, 'fake-calls.log'), 'utf8').slice(restartMark);
+    check('restart ran WITHOUT the override file',
+      restartCalls.includes('"restart"') && !restartCalls.includes('docker-compose.manager.json'),
+      restartCalls.trim());
+  } finally {
+    await stopManager(mgr);
+  }
+
+  // The in-use snapshot is on disk: a fresh manager process still
+  // reports the deployed merge.
+  mgr = startManager({ configPath: psCfg, dataDir });
+  try {
+    await waitHealth();
+    const r = await api('GET', '/api/apps/test-app/env/current');
+    check('current survives a manager restart (snapshot persisted)',
+      r.json.applied === true
+        && (r.json.entries || []).some((e) => e.key === 'FOO' && e.source === 'dynamic'),
+      { applied: r.json.applied });
+  } finally {
+    await stopManager(mgr);
+  }
+
+  // A failed deployment names its failed step, in the record and in
+  // its tags. FAKE_DOCKER_FAIL_UP makes compose up exit 1.
+  mgr = startManager({ configPath: psCfg, dataDir, extraEnv: { FAKE_DOCKER_FAIL_UP: '1' } });
+  try {
+    await waitHealth();
+    const before = (await api('GET', '/api/deployments?limit=100')).json.deployments
+      .filter((d) => d.kind === 'deploy' && d.result === 'failed').length;
+    await api('POST', '/api/apps/test-app/update');
+    const failedDep = await waitFor('failed deployment record', async () => {
+      const x = await api('GET', '/api/deployments?limit=100');
+      const failed = x.json.deployments.filter((d) => d.kind === 'deploy' && d.result === 'failed');
+      return failed.length > before ? failed[0] : false;
+    }, 60_000);
+    check('failed deployment: failedStep is the up step',
+      failedDep.failedStep === 'docker compose up -d --build', failedDep.failedStep);
+    const fTags = Object.fromEntries((failedDep.tags || []).map((t) => [t.type, t.label]));
+    check('failed deployment tags: Failed + failed-at step',
+      fTags.result === 'Failed' && fTags.failedStep === 'failed at: docker compose up -d --build',
+      failedDep.tags);
   } finally {
     await stopManager(mgr);
   }

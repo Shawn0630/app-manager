@@ -34,12 +34,23 @@ development).
   Every run — success or failure — is appended to
   `data/deployments.jsonl` with per-step exit codes and output tails.
   Start / Stop / Restart are journaled there too, as lightweight
-  `kind: "action"` records (action, result, duration, output tail),
-  and the dashboard's Activity feed shows all three kinds.
-- **.env editing**: table editor (values masked by default) or raw
-  text editor. Saves are validated line by line, written atomically,
-  the previous version is backed up, and only the changed **key
-  names** are recorded — never values (see Security).
+  `kind: "action"` records (action, result, duration, output tail).
+  The dashboard's Activity feed renders every record as a row of
+  **tags** — kind (Deploy / Action / Env), action (Update, Redeploy,
+  Start, …), trigger (Manual / Auto · Commit / GitHub Actions),
+  result (Success / Failed) — and a failed deployment names the step
+  it died on right in the row.
+- **Two-layer .env editing**: the app repo's `.env` is the **static**
+  layer (table editor with masked values, or raw text; saves are
+  validated line by line, written atomically, the previous version
+  is backed up, and only the changed **key names** are recorded —
+  never values). A second, manager-kept **dynamic** layer holds
+  per-deployment overrides: on each deployment the effective env is
+  static + dynamic (dynamic wins), injected into the containers via
+  a generated compose override file — the repo's `.env` is never
+  touched by deployments. The editor's **Currently in use** section
+  shows the effective env of the last deployment, per key, with its
+  source. See ".env: static, dynamic, and currently in use" below.
 - **Optional login**: HTTP Basic auth, enabled by setting
   `MANAGER_PASSWORD`.
 
@@ -114,7 +125,7 @@ Environment variables for the manager itself:
 | --- | --- | --- |
 | `PORT` | `9000` | Listen port. |
 | `CONFIG_PATH` | `./config/apps.json` | App registry location. |
-| `DATA_DIR` | `./data` | `deployments.jsonl`, .env backups, trigger state. |
+| `DATA_DIR` | `./data` | `deployments.jsonl`, .env backups, trigger state, dynamic env layers (`dynamic/`), generated compose overrides (`overrides/`), in-use env snapshots (`in-use/`). |
 | `APPS_ROOT` | `./apps` | Add App clones new repos into `APPS_ROOT/<id>`. |
 | `MANAGER_USER` | `admin` | Basic auth user (only with a password). |
 | `MANAGER_PASSWORD` | _(unset)_ | When set, Basic auth protects **all** routes. |
@@ -204,10 +215,27 @@ without a token but are rate-limited (60 requests/hour per IP),
 which a short `pollIntervalSec` can exhaust — a token is
 recommended either way.
 
-## .env editing
+## .env: static, dynamic, and currently in use
 
-Each app card has an **Environment** button. The editor opens the
-file at `<workdir>/<envFile>`:
+Each app card has an **Environment** button. The panel has three
+sections, top to bottom:
+
+### Currently in use
+
+The effective environment of the most recent deployment, one row
+per key: value (masked unless **Show values** is on) and a source
+tag — `static` or `dynamic`; a static key shadowed by a dynamic
+override is flagged as such. The header names the deployment that
+put it in effect (time + trigger). Before any deployment has
+applied overrides, it shows the static layer alone, labelled
+"static values only". The key set and sources are persisted at
+deployment time (`DATA_DIR/in-use/<appId>.json`, key names and
+sources only — no values), so the view survives manager restarts;
+values themselves are resolved live from the two layers below.
+
+### Static — from the app repo's .env
+
+The file at `<workdir>/<envFile>`, owned by the repo:
 
 - **Table mode**: one row per variable; keys are read-only, values
   are masked password fields (toggle **Show values** to reveal).
@@ -223,6 +251,32 @@ file at `<workdir>/<envFile>`:
   `DATA_DIR/backups/<appId>/<timestamp>.env` (newest 10 kept). The
   write itself is atomic (temp file + rename).
 
+### Dynamic — overrides for deployments
+
+Overrides kept by the manager at `DATA_DIR/dynamic/<appId>.json`
+(key/value pairs, edited in the same table style). They are applied
+**at deployment time only** — manual Update, commit-poll and
+GitHub-Actions auto-deploys, and env redeploys. Start / Stop /
+Restart never apply them; editing the dynamic layer changes nothing
+until the next deployment.
+
+How a deployment applies them:
+
+1. The manager discovers the project's services with
+   `docker compose config --services`.
+2. It (re)generates `DATA_DIR/overrides/<appId>/docker-compose.manager.json`
+   (JSON is valid compose) setting `environment:` for every service
+   from the dynamic entries, and passes it to `docker compose` as an
+   extra `-f` file for the `up` and `ps` steps. Containers therefore
+   really receive the dynamic values — and per compose semantics
+   `environment:` also wins over `env_file:` for the same key —
+   while the repo's `.env` file stays byte-for-byte untouched.
+3. The deployment record notes the applied override **key names**
+   (`dynamicKeys`, shown in the Activity detail as "Dynamic
+   overrides applied: …") — never values. If the override cannot be
+   prepared, the deployment fails at its "apply dynamic env" step
+   instead of silently deploying without the overrides.
+
 ## Security — read this
 
 - **Mounting `/var/run/docker.sock` gives the manager root-equivalent
@@ -232,10 +286,13 @@ file at `<workdir>/<envFile>`:
 - **.env files usually contain secrets.** Only edit them through the
   dashboard when `MANAGER_PASSWORD` is set (otherwise anyone on the
   LAN can read and change them via the env endpoint). Env **values**
-  are returned only by the dedicated env endpoint; they are never
-  written to server logs, deployment records (only key names are),
-  or backups of anything but the .env file itself (the backups under
-  `DATA_DIR/backups/` do contain old values — protect `DATA_DIR`).
+  are returned only by the dedicated env endpoints; they are never
+  written to server logs or deployment records (only key names
+  are). They do live in `DATA_DIR` by design — the static backups
+  under `DATA_DIR/backups/`, the dynamic layers under
+  `DATA_DIR/dynamic/`, and the generated compose overrides under
+  `DATA_DIR/overrides/` all contain values — so protect `DATA_DIR`
+  like a secrets directory.
 - Deploy uses `git pull --ff-only`: local uncommitted changes in an
   app's workdir can make pulls fail (recorded as failed deployments).
   Keep managed workdirs clean — they are deployment targets, not
@@ -291,6 +348,11 @@ local bare git repo as the remote, and a mock app workdir exercise
 the full flow — status, check, manual update, stop/start, logs,
 polling auto-deploy, the busy mutex, Basic auth, and the .env
 endpoints (including backups and the "key names only" journal rule).
+Later phases cover the real Compose v2 `ps` output shapes, the
+action journal, the Activity tag structure, and the dynamic env
+layer end to end (override file generated and passed to compose,
+static file untouched, in-use view correct and persistent, failed
+deployments naming their failed step).
 A second phase swaps in a **mock GitHub API** server and verifies
 the Actions trigger end to end: run parsing, the baseline rule, a
 successful run deploying, a failed run not deploying, no

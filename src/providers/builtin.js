@@ -14,6 +14,58 @@ import { run, tailText } from '../run.js';
 import * as git from '../git.js';
 import { appendDeployment } from '../deployments.js';
 import { appState } from '../store.js';
+import { prepareDynamicOverride, mergeEnvEntries, writeInUseSnapshot } from '../dynenv.js';
+import { readEnvFile } from '../envfile.js';
+
+// Shared tail of deploy()/redeploy(): when the run's `up` step
+// succeeded, record which env is now in effect (static file as it
+// stands now + the dynamic entries this run applied — key names and
+// sources only) so the "Currently in use" view survives restarts.
+async function snapshotInUse(app, trigger, dyn) {
+  try {
+    const staticNow = await readEnvFile(app).catch(() => ({ entries: [] }));
+    const merged = mergeEnvEntries(staticNow.entries, dyn.entries || []);
+    await writeInUseSnapshot(app, {
+      ts: new Date().toISOString(),
+      trigger,
+      mergedEntries: merged.entries,
+      dynamicKeys: dyn.dynamicKeys || [],
+    });
+  } catch {
+    // A snapshot failure must never fail the deployment itself.
+  }
+}
+
+// Prepare the dynamic-env override as a recorded pipeline step.
+// With no dynamic entries this is a no-op (no step, no override
+// file). A preparation failure is a failed step and aborts the
+// pipeline: deploying without the requested overrides would be a
+// silent lie.
+async function dynamicStep(app, steps) {
+  try {
+    const dyn = await prepareDynamicOverride(app);
+    if (dyn.dynamicKeys.length) {
+      steps.push({
+        name: 'apply dynamic env',
+        ok: true,
+        code: 0,
+        output: tailText(
+          `dynamic overrides for services: ${dyn.services.join(', ')}\nkeys: ${dyn.dynamicKeys.join(', ')}\noverride file: ${dyn.overridePath}`,
+        ),
+      });
+    }
+    return dyn;
+  } catch (e) {
+    steps.push({ name: 'apply dynamic env', ok: false, code: e.code ?? null, output: tailText(e.output || e.message) });
+    throw e;
+  }
+}
+
+function composeFileArgs(app, dyn) {
+  const args = ['compose', '-p', app.projectName, '-f', `${app.workdir}/${app.composeFile}`];
+  if (dyn && dyn.overridePath) args.push('-f', dyn.overridePath);
+  return args;
+}
 
 // Check the remote branch HEAD and update the cache. On failure only
 // lastPollError is recorded and null is returned — polling must never
@@ -55,26 +107,33 @@ export async function deploy(app, trigger, opts = {}) {
   }
 
   let result = 'success';
+  let dyn = { overridePath: null, dynamicKeys: [], entries: [] };
+  let upOk = false;
   try {
     await step('git fetch', 'git', ['-C', app.workdir, 'fetch', 'origin', app.branch], 120_000);
     // --ff-only: if local and remote have diverged, fail and record it;
     // never force-push or overwrite local changes.
     await step('git pull --ff-only', 'git', ['-C', app.workdir, 'pull', '--ff-only', 'origin', app.branch], 120_000);
+    // Dynamic env overrides are a deployment-time concern: the
+    // override file is generated here and added to the up/ps calls.
+    dyn = await dynamicStep(app, steps);
     await step(
       'docker compose up -d --build',
       'docker',
-      ['compose', '-p', app.projectName, '-f', `${app.workdir}/${app.composeFile}`, 'up', '-d', '--build'],
+      [...composeFileArgs(app, dyn), 'up', '-d', '--build'],
       900_000,
     );
+    upOk = true;
     await step(
       'docker compose ps (verify)',
       'docker',
-      ['compose', '-p', app.projectName, '-f', `${app.workdir}/${app.composeFile}`, 'ps', '--format', 'json'],
+      [...composeFileArgs(app, dyn), 'ps', '--format', 'json'],
       60_000,
     );
   } catch {
     result = 'failed';
   }
+  if (upOk) await snapshotInUse(app, trigger, dyn);
 
   const to = await git.headOrNull(app.workdir);
   const record = {
@@ -86,6 +145,9 @@ export async function deploy(app, trigger, opts = {}) {
     toCommit: to ? to.head : null,
     result,
     durationMs: Date.now() - startedAt,
+    // Dynamic override KEY NAMES applied by this deployment (values
+    // are never recorded). Empty when the app has no dynamic layer.
+    dynamicKeys: dyn.dynamicKeys,
     steps,
   };
   if (opts.workflowRunId != null) record.workflowRunId = opts.workflowRunId;
@@ -120,22 +182,28 @@ export async function redeploy(app, trigger) {
   }
 
   let result = 'success';
+  let dyn = { overridePath: null, dynamicKeys: [], entries: [] };
+  let upOk = false;
   try {
+    // A redeploy is a deployment too: dynamic overrides apply.
+    dyn = await dynamicStep(app, steps);
     await step(
       'docker compose up -d (env updated)',
       'docker',
-      ['compose', '-p', app.projectName, '-f', `${app.workdir}/${app.composeFile}`, 'up', '-d'],
+      [...composeFileArgs(app, dyn), 'up', '-d'],
       300_000,
     );
+    upOk = true;
     await step(
       'docker compose ps (verify)',
       'docker',
-      ['compose', '-p', app.projectName, '-f', `${app.workdir}/${app.composeFile}`, 'ps', '--format', 'json'],
+      [...composeFileArgs(app, dyn), 'ps', '--format', 'json'],
       60_000,
     );
   } catch {
     result = 'failed';
   }
+  if (upOk) await snapshotInUse(app, trigger, dyn);
 
   const record = {
     ts: new Date(startedAt).toISOString(),
@@ -146,6 +214,7 @@ export async function redeploy(app, trigger) {
     toCommit: commit,
     result,
     durationMs: Date.now() - startedAt,
+    dynamicKeys: dyn.dynamicKeys,
     steps,
   };
   await appendDeployment(record);

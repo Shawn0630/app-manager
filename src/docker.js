@@ -3,12 +3,17 @@
 import path from 'node:path';
 import { run } from './run.js';
 
-export function composeArgs(app, sub) {
-  return ['compose', '-p', app.projectName, '-f', path.join(app.workdir, app.composeFile), ...sub];
+export function composeArgs(app, sub, opts = {}) {
+  const args = ['compose', '-p', app.projectName, '-f', path.join(app.workdir, app.composeFile)];
+  // opts.overrideFile: an extra compose file (the manager-generated
+  // dynamic-env override) applied after the app's own file.
+  if (opts.overrideFile) args.push('-f', opts.overrideFile);
+  return [...args, ...sub];
 }
 
 export function composeRun(app, sub, opts = {}) {
-  return run('docker', composeArgs(app, sub), { timeout: 900_000, ...opts });
+  const { overrideFile, ...runOpts } = opts;
+  return run('docker', composeArgs(app, sub, { overrideFile }), { timeout: 900_000, ...runOpts });
 }
 
 // Parse `docker compose ps --format json` output. Real Compose v2

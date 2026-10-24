@@ -7,7 +7,9 @@
 //   DELETE /api/apps/:id[?purge=1]     remove an app (purge: + workdir)
 //   POST   /api/apps/:id/start|stop|restart|update|check|redeploy
 //   GET    /api/apps/:id/logs?tail=200
-//   GET/PUT /api/apps/:id/env
+//   GET/PUT /api/apps/:id/env            static layer (repo .env)
+//   GET/PUT /api/apps/:id/env/dynamic    dynamic layer (deploy-time overrides)
+//   GET    /api/apps/:id/env/current     "currently in use" effective env
 //   GET    /api/deployments?limit=20
 // Everything else is the static dashboard in public/.
 import fs from 'node:fs';
@@ -19,6 +21,8 @@ import { PORT, CONFIG_PATH, DATA_DIR, APPS_ROOT, loadApps, saveApps } from './co
 import { appStatus } from './status.js';
 import { composeRun, composeLogs } from './docker.js';
 import { listDeployments, appendActionRecord } from './deployments.js';
+import { tagsForRecord, failedStepOf } from './activity.js';
+import { readDynamicEntries, dynamicExists, saveDynamicEnv, currentInUse } from './dynenv.js';
 import { runOp, BusyError } from './ops.js';
 import { appState } from './store.js';
 import { readEnvFile, saveEnvFile } from './envfile.js';
@@ -132,7 +136,15 @@ app.delete('/api/apps/:id', async (req, res) => {
 
 app.get('/api/deployments', (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 20));
-  res.json({ deployments: listDeployments(limit) });
+  // Each record is annotated with display tags (kind / action /
+  // trigger / result / failed step) computed server-side, so the
+  // dashboard renders chips instead of decoding raw fields.
+  const deployments = listDeployments(limit).map((d) => ({
+    ...d,
+    tags: tagsForRecord(d),
+    failedStep: failedStepOf(d),
+  }));
+  res.json({ deployments });
 });
 
 app.get('/api/apps/:id/logs', async (req, res) => {
@@ -177,6 +189,54 @@ app.put('/api/apps/:id/env', async (req, res) => {
     return res.json({ ok: true, ...diff });
   } catch (e) {
     if (e.badLines) return res.status(400).json({ error: e.message, badLines: e.badLines });
+    return res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+// Read one app's DYNAMIC env layer (manager-kept overrides, applied
+// at deployment time). Like the static env endpoint, this returns
+// values — it is an editor endpoint.
+app.get('/api/apps/:id/env/dynamic', async (req, res) => {
+  const a = byId.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'app not found' });
+  try {
+    const [entries, exists] = await Promise.all([readDynamicEntries(a), dynamicExists(a)]);
+    return res.json({ exists, entries });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+// Replace one app's dynamic layer from posted KEY=VALUE text (same
+// validation as the static file). Only key names are journaled.
+// Takes effect at the NEXT deployment; running containers and
+// Start/Stop/Restart are unaffected until then.
+app.put('/api/apps/:id/env/dynamic', async (req, res) => {
+  const a = byId.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'app not found' });
+  const text = req.body && typeof req.body.text === 'string' ? req.body.text : null;
+  if (text === null) return res.status(400).json({ error: 'body must be { "text": "..." }' });
+  if (appState(a.id).busy) {
+    return res.status(409).json({ error: `app ${a.id} is busy, try again later` });
+  }
+  try {
+    const diff = await saveDynamicEnv(a, text);
+    return res.json({ ok: true, ...diff });
+  } catch (e) {
+    if (e.badLines) return res.status(400).json({ error: e.message, badLines: e.badLines });
+    return res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+// The "Currently in use" view: the effective env of the most recent
+// deployment (static + dynamic merged, per-key source), resolved
+// live; before any applying deployment, the static layer alone.
+app.get('/api/apps/:id/env/current', async (req, res) => {
+  const a = byId.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'app not found' });
+  try {
+    return res.json(await currentInUse(a));
+  } catch (e) {
     return res.status(500).json({ error: e.message || String(e) });
   }
 });

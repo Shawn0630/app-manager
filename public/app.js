@@ -199,16 +199,54 @@ function renderSummary(apps) {
     (counts.busy ? `<span class="chip working"><b>${counts.busy}</b> working</span>` : '');
 }
 
+// Activity rows are rendered from TAGS: the server attaches a
+// `tags` array (kind / action / trigger / result / failed step) to
+// every record served by /api/deployments. deriveTags mirrors that
+// logic as a fallback so a record without tags (old cache, partial
+// response) still renders as chips instead of raw text.
+function deriveTags(d) {
+  const tags = [];
+  const kind = d.kind || 'deploy';
+  const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+  if (kind === 'deploy') tags.push({ type: 'kind', label: 'Deploy', cls: 'kind-deploy' });
+  else if (kind === 'action') tags.push({ type: 'kind', label: 'Action', cls: 'kind-action' });
+  else if (kind === 'env') tags.push({ type: 'kind', label: 'Env', cls: 'kind-env' });
+  if (kind === 'action' && d.action) tags.push({ type: 'action', label: cap(d.action), cls: 'tag-action' });
+  else if (kind === 'deploy') tags.push({ type: 'action', label: d.trigger === 'manual-env' ? 'Redeploy' : 'Update', cls: 'tag-action' });
+  else if (kind === 'env') {
+    tags.push({
+      type: 'action',
+      label: d.layer === 'dynamic' ? 'Dynamic env save' : d.layer === 'static' ? 'Static env save' : 'Env save',
+      cls: 'tag-action',
+    });
+  }
+  if (d.trigger === 'poll') tags.push({ type: 'trigger', label: 'Auto · Commit', cls: 'trig-auto' });
+  else if (d.trigger === 'actions') tags.push({ type: 'trigger', label: 'GitHub Actions', cls: 'trig-actions' });
+  else tags.push({ type: 'trigger', label: 'Manual', cls: 'trig-manual' });
+  if (d.result === 'success') tags.push({ type: 'result', label: 'Success', cls: 'ok' });
+  else if (d.result === 'failed') tags.push({ type: 'result', label: 'Failed', cls: 'fail' });
+  if (d.failedStep) tags.push({ type: 'failedStep', label: `failed at: ${d.failedStep}`, cls: 'fail-step' });
+  else if (kind === 'deploy' && d.result === 'failed') {
+    const bad = (d.steps || []).find((s) => !s.ok);
+    if (bad) tags.push({ type: 'failedStep', label: `failed at: ${bad.name}`, cls: 'fail-step' });
+  }
+  return tags;
+}
+
+function tagsHtml(d) {
+  const tags = (d.tags && d.tags.length) ? d.tags : deriveTags(d);
+  return `<span class="tags">${tags.map((t) => `<span class="badge ${esc(t.cls || '')} no-dot">${esc(t.label)}</span>`).join(' ')}</span>`;
+}
+
 function historyRow(d) {
   const when = esc(fmtTime(d.ts));
+  const head = `<span class="when">${when}</span> · <span class="app-name">${esc(d.appId)}</span> ${tagsHtml(d)}`;
+  const dur = ` <span class="note">· ${esc(fmtDuration(d.durationMs))}</span>`;
+
   if (d.kind === 'action') {
-    const badge = d.result === 'success'
-      ? '<span class="badge ok no-dot">success</span>'
-      : '<span class="badge fail no-dot">failed</span>';
     return `
     <div class="hist-row kind-action">
-      <span class="when">${when}</span> · <span class="app-name">${esc(d.appId)}</span>
-      <span class="badge kind-action no-dot">Action</span> <b>${esc(d.action)}</b> · ${badge} · ${esc(fmtDuration(d.durationMs))}
+      ${head}${dur}
       ${d.output ? `<details><summary>Output</summary><pre class="output">${esc(d.output)}</pre></details>` : ''}
     </div>`;
   }
@@ -217,24 +255,17 @@ function historyRow(d) {
     if ((d.added || []).length) parts.push(`added: ${d.added.map(esc).join(', ')}`);
     if ((d.changed || []).length) parts.push(`changed: ${d.changed.map(esc).join(', ')}`);
     if ((d.removed || []).length) parts.push(`removed: ${d.removed.map(esc).join(', ')}`);
-    const result = d.result
-      ? ` · ${d.result === 'success'
-        ? '<span class="badge ok no-dot">success</span>'
-        : '<span class="badge fail no-dot">failed</span>'}`
-      : '';
-    const what = d.trigger === 'manual-env' ? 'redeployed after environment update' : 'environment updated';
     return `
     <div class="hist-row kind-env">
-      <span class="when">${when}</span> · <span class="app-name">${esc(d.appId)}</span>
-      <span class="badge kind-env no-dot">Env</span> ${what}${result}
-      ${parts.length ? ` · ${parts.join(' · ')}` : ''}
+      ${head}
+      ${parts.length ? `<span class="note">· ${parts.join(' · ')}</span>` : ''}
     </div>`;
   }
-  const badge = d.result === 'success'
-    ? '<span class="badge ok no-dot">success</span>'
-    : '<span class="badge fail no-dot">failed</span>';
-  const runRef = d.workflowRunId != null ? ` · run #${esc(String(d.workflowRunId))}` : '';
+  const runRef = d.workflowRunId != null ? ` <span class="note">· run #${esc(String(d.workflowRunId))}</span>` : '';
   const note = d.note ? `<div class="note">${esc(d.note)}</div>` : '';
+  const dynLine = (d.dynamicKeys || []).length
+    ? `<div class="dyn-line">Dynamic overrides applied: ${d.dynamicKeys.map(esc).join(', ')}</div>`
+    : '';
   const steps = (d.steps || []).map((s) => `
     <div class="step">
       <span class="badge ${s.ok ? 'ok' : 'fail'} no-dot">${s.ok ? 'ok' : `failed (exit ${s.code == null ? '?' : s.code})`}</span>
@@ -243,12 +274,10 @@ function historyRow(d) {
     </div>`).join('');
   return `
   <div class="hist-row kind-deploy">
-    <span class="when">${when}</span> · <span class="app-name">${esc(d.appId)}</span>
-    <span class="badge kind-deploy no-dot">Deploy</span> ${esc(triggerLabel(d.trigger))}${runRef} · ${badge}
-    · <span class="hash">${esc(shortHash(d.fromCommit))} → ${esc(shortHash(d.toCommit))}</span>
-    · ${esc(fmtDuration(d.durationMs))}
+    ${head}${runRef}${dur}
+    <span class="note">· <span class="hash">${esc(shortHash(d.fromCommit))} → ${esc(shortHash(d.toCommit))}</span></span>
     ${note}
-    ${steps ? `<details><summary>Steps (${d.steps.length})</summary>${steps}</details>` : ''}
+    ${steps || dynLine ? `<details><summary>Steps (${(d.steps || []).length})</summary>${dynLine}${steps}</details>` : ''}
   </div>`;
 }
 
@@ -366,7 +395,12 @@ const envTableWrap = document.getElementById('envTableWrap');
 const envShowValues = document.getElementById('envShowValues');
 const envModeTableBtn = document.getElementById('envModeTable');
 const envModeRawBtn = document.getElementById('envModeRaw');
-let envCtx = null; // { id, envFile, originalText, mode }
+const inUseMeta = document.getElementById('inUseMeta');
+const inUseRows = document.getElementById('inUseRows');
+const inUseEmpty = document.getElementById('inUseEmpty');
+const dynRows = document.getElementById('dynRows');
+const dynMsg = document.getElementById('dynMsg');
+let envCtx = null; // { id, envFile, originalText, mode, inUse }
 
 function envRowHtml(key, value, isNew) {
   return `<td><input class="env-key" value="${esc(key)}" ${isNew ? '' : 'readonly'} spellcheck="false"></td>
@@ -447,14 +481,107 @@ function envCurrentText() {
   return envCtx.mode === 'raw' ? envRaw.value : serializeTable();
 }
 
+// "Currently in use": the effective env of the last deployment.
+// Values are masked unless "Show values" is on (same toggle as the
+// editors). Each row carries its source tag; a dynamic row that
+// shadowed a static key says so.
+function renderInUse(data) {
+  if (!envCtx) return;
+  envCtx.inUse = data;
+  if (!data) {
+    inUseMeta.textContent = 'Failed to load.';
+    inUseRows.innerHTML = '';
+    inUseEmpty.classList.add('hidden');
+    return;
+  }
+  if (data.applied) {
+    inUseMeta.textContent = `In effect since the deployment at ${fmtTime(data.deployedAt)} · ${triggerLabel(data.trigger)}.`;
+  } else if (data.deployedAt) {
+    inUseMeta.textContent = `Last deployment at ${fmtTime(data.deployedAt)} · ${triggerLabel(data.trigger)}. ${data.note || ''}`;
+  } else {
+    inUseMeta.textContent = data.note || '';
+  }
+  const show = envShowValues.checked;
+  inUseRows.innerHTML = (data.entries || []).map((e) => {
+    const src = e.source === 'dynamic'
+      ? '<span class="badge src-dynamic no-dot">dynamic</span>'
+      : '<span class="badge src-static no-dot">static</span>';
+    const over = e.overridden ? ' <span class="note">overrides the static value</span>' : '';
+    const val = e.stale
+      ? '<span class="note">(value no longer set)</span>'
+      : show
+        ? `<span class="mono">${esc(e.value)}</span>`
+        : '<span class="masked">••••••••</span>';
+    return `<tr><td><span class="mono">${esc(e.key)}</span></td><td>${val}</td><td>${src}${over}</td></tr>`;
+  }).join('');
+  inUseEmpty.classList.toggle('hidden', (data.entries || []).length > 0);
+}
+
+// ---------- Dynamic layer editor (table mode over the saved
+// overrides; keys are always editable because they are new) ----------
+function dynRowHtml(key, value, isNew) {
+  return `<td><input class="dyn-key" value="${esc(key)}" spellcheck="false" placeholder="KEY"></td>
+    <td><input class="dyn-val" type="${envShowValues.checked ? 'text' : 'password'}" value="${esc(value)}" spellcheck="false"></td>
+    <td><button type="button" class="env-del dyn-del">Remove</button></td>`;
+}
+
+function renderDynRows(entries) {
+  dynRows.innerHTML = entries.map((e) => `<tr>${dynRowHtml(e.key, e.value, false)}</tr>`).join('');
+}
+
+function readDynRows() {
+  const rows = [];
+  dynRows.querySelectorAll('tr').forEach((tr) => {
+    const key = tr.querySelector('.dyn-key').value.trim();
+    const value = tr.querySelector('.dyn-val').value;
+    if (key) rows.push({ key, value });
+  });
+  return rows;
+}
+
+async function saveDyn() {
+  if (!envCtx) return;
+  const text = readDynRows().map((r) => `${r.key}=${r.value}`).join('\n');
+  dynMsg.textContent = 'Saving…';
+  try {
+    const res = await fetch(`/api/apps/${encodeURIComponent(envCtx.id)}/env/dynamic`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const parts = [];
+    if ((data.added || []).length) parts.push(`added ${data.added.join(', ')}`);
+    if ((data.changed || []).length) parts.push(`changed ${data.changed.join(', ')}`);
+    if ((data.removed || []).length) parts.push(`removed ${data.removed.join(', ')}`);
+    dynMsg.textContent = (parts.length ? `Saved (${parts.join('; ')}).` : 'Saved. No changes.')
+      + ' Applies at the next deployment.';
+  } catch (e) {
+    dynMsg.innerHTML = `<span class="err">${esc(e.message)} — keys must look like KEY_NAME.</span>`;
+  }
+  refresh();
+}
+
 async function openEnv(id) {
   envMsg.textContent = '';
+  dynMsg.textContent = '';
   envNote.textContent = 'Loading…';
-  envCtx = { id, envFile: '.env', originalText: '', mode: 'table' };
+  inUseMeta.textContent = 'Loading…';
+  inUseRows.innerHTML = '';
+  envCtx = { id, envFile: '.env', originalText: '', mode: 'table', inUse: null };
   envTitle.textContent = `Environment — ${id}`;
   envModal.classList.remove('hidden');
-  try {
-    const data = await api(`/api/apps/${encodeURIComponent(id)}/env`);
+  const enc = encodeURIComponent(id);
+  // The three layers load independently: one failing must not
+  // blank the others.
+  const [staticRes, dynRes, currentRes] = await Promise.allSettled([
+    api(`/api/apps/${enc}/env`),
+    api(`/api/apps/${enc}/env/dynamic`),
+    api(`/api/apps/${enc}/env/current`),
+  ]);
+  if (staticRes.status === 'fulfilled') {
+    const data = staticRes.value;
     envCtx.envFile = data.envFile || '.env';
     envCtx.originalText = data.text || '';
     envTitle.textContent = `Environment — ${id} (${envCtx.envFile})`;
@@ -466,10 +593,17 @@ async function openEnv(id) {
     envRaw.classList.add('hidden');
     envModeTableBtn.classList.add('active');
     envModeRawBtn.classList.remove('active');
-  } catch (e) {
+  } else {
     envNote.textContent = '';
-    envMsg.innerHTML = `<span class="err">Failed to load: ${esc(e.message)}</span>`;
+    envMsg.innerHTML = `<span class="err">Failed to load static layer: ${esc(staticRes.reason.message)}</span>`;
   }
+  if (dynRes.status === 'fulfilled') {
+    renderDynRows(dynRes.value.entries || []);
+    if (!dynRes.value.exists) dynMsg.textContent = 'No dynamic overrides yet — they are optional.';
+  } else {
+    dynMsg.innerHTML = `<span class="err">Failed to load dynamic layer: ${esc(dynRes.reason.message)}</span>`;
+  }
+  renderInUse(currentRes.status === 'fulfilled' ? currentRes.value : null);
 }
 
 async function saveEnv(redeploy) {
@@ -504,6 +638,17 @@ async function saveEnv(redeploy) {
     }
   }
   refresh();
+  // The redeploy (once it finishes) changes what is in use; reload
+  // that section after a short delay so the panel stays truthful.
+  if (redeploy && envCtx) {
+    const ctx = envCtx;
+    setTimeout(async () => {
+      if (envCtx !== ctx) return;
+      try {
+        renderInUse(await api(`/api/apps/${encodeURIComponent(ctx.id)}/env/current`));
+      } catch { /* keep the old view on failure */ }
+    }, 3000);
+  }
 }
 
 envRows.addEventListener('click', (ev) => {
@@ -520,7 +665,22 @@ envShowValues.addEventListener('change', () => {
   envRows.querySelectorAll('.env-val').forEach((input) => {
     input.type = envShowValues.checked ? 'text' : 'password';
   });
+  dynRows.querySelectorAll('.dyn-val').forEach((input) => {
+    input.type = envShowValues.checked ? 'text' : 'password';
+  });
+  if (envCtx) renderInUse(envCtx.inUse);
 });
+dynRows.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('.dyn-del');
+  if (btn) btn.closest('tr').remove();
+});
+document.getElementById('dynAddRow').addEventListener('click', () => {
+  const tr = document.createElement('tr');
+  tr.innerHTML = dynRowHtml('', '', true);
+  dynRows.appendChild(tr);
+  tr.querySelector('.dyn-key').focus();
+});
+document.getElementById('dynSave').addEventListener('click', saveDyn);
 envModeTableBtn.addEventListener('click', () => setEnvMode('table'));
 envModeRawBtn.addEventListener('click', () => setEnvMode('raw'));
 document.getElementById('envSave').addEventListener('click', () => saveEnv(false));

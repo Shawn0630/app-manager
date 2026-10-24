@@ -78,26 +78,58 @@
       <span id="envTitle">Environment</span>
       <button id="envClose" type="button" class="btn btn-small">Close</button>
     </div>
-    <div class="env-toolbar">
-      <div class="seg">
-        <button id="envModeTable" type="button">Table</button>
-        <button id="envModeRaw" type="button">Raw</button>
-      </div>
-      <label class="env-show"><input type="checkbox" id="envShowValues"> Show values</label>
-      <span id="envNote" class="muted"></span>
-    </div>
-    <div id="envTableWrap">
-      <table class="env-table">
-        <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
-        <tbody id="envRows"></tbody>
-      </table>
-      <button id="envAddRow" type="button" class="btn btn-small">Add variable</button>
-    </div>
-    <textarea id="envRaw" class="hidden" spellcheck="false"></textarea>
-    <div class="env-actions">
-      <span id="envMsg" class="muted"></span>
-      <button id="envSave" type="button" class="btn">Save</button>
-      <button id="envSaveRedeploy" type="button" class="btn btn-primary">Save &amp; Redeploy</button>
+    <div class="env-body">
+      <section class="env-section">
+        <h3>Currently in use</h3>
+        <div id="inUseMeta" class="note">Loading…</div>
+        <table class="env-table inuse-table">
+          <thead><tr><th>Key</th><th>Value</th><th>Source</th></tr></thead>
+          <tbody id="inUseRows"></tbody>
+        </table>
+        <div id="inUseEmpty" class="muted hidden">No variables in effect.</div>
+      </section>
+      <section class="env-section">
+        <h3>Static — from the app repo's .env</h3>
+        <div class="env-toolbar">
+          <div class="seg">
+            <button id="envModeTable" type="button">Table</button>
+            <button id="envModeRaw" type="button">Raw</button>
+          </div>
+          <label class="env-show"><input type="checkbox" id="envShowValues"> Show values</label>
+          <span id="envNote" class="muted"></span>
+        </div>
+        <div id="envTableWrap">
+          <table class="env-table">
+            <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+            <tbody id="envRows"></tbody>
+          </table>
+          <button id="envAddRow" type="button" class="btn btn-small">Add variable</button>
+        </div>
+        <textarea id="envRaw" class="hidden" spellcheck="false"></textarea>
+        <div class="env-actions">
+          <span id="envMsg" class="muted"></span>
+          <button id="envSave" type="button" class="btn">Save</button>
+          <button id="envSaveRedeploy" type="button" class="btn btn-primary">Save &amp; Redeploy</button>
+        </div>
+      </section>
+      <section class="env-section">
+        <h3>Dynamic — overrides for deployments</h3>
+        <p class="note">Kept by the manager, not in the repo. On each deployment the dynamic
+          layer is applied on top of the static layer (same key: dynamic wins). It takes
+          effect at the <b>next deployment</b> — Update, auto-deploy, or redeploy.
+          Start / Stop / Restart do not apply dynamic values.</p>
+        <div id="dynTableWrap">
+          <table class="env-table">
+            <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+            <tbody id="dynRows"></tbody>
+          </table>
+          <button id="dynAddRow" type="button" class="btn btn-small">Add variable</button>
+        </div>
+        <div class="env-actions">
+          <span id="dynMsg" class="muted"></span>
+          <button id="dynSave" type="button" class="btn btn-primary">Save dynamic</button>
+        </div>
+      </section>
     </div>
   </div>
 </div>

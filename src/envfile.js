@@ -122,6 +122,7 @@ export async function saveEnvFile(app, text) {
     ts: new Date().toISOString(),
     appId: app.id,
     kind: 'env',
+    layer: 'static',
     trigger: 'manual',
     added: diff.added,
     removed: diff.removed,
