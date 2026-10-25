@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { APPS_ROOT, normalizeApp } from './config.js';
+import { detectEnvFiles } from './envdetect.js';
 import { run, tailText } from './run.js';
 import * as git from './git.js';
 import { parseRepo } from './github.js';
@@ -77,6 +78,11 @@ export async function registerApp(input, existingIds) {
     if (found) composeFile = found;
     else warning = noComposeWarning();
   }
+  // If the compose file declares env_file entries, the first one
+  // is the app's env file — projects keep it in places like
+  // server/.env, not always the repo root. An explicit envFile in
+  // the input still wins; nothing detected keeps the .env default.
+  const envDetected = detectEnvFiles(workdir, composeFile);
 
   const app = normalizeApp({
     id,
@@ -86,6 +92,7 @@ export async function registerApp(input, existingIds) {
     workdir,
     branch,
     composeFile,
+    envFile: (input && input.envFile) || envDetected[0] || undefined,
     projectName: id,
     port: input && input.port != null && input.port !== '' ? Number(input.port) : null,
     autoDeploy: Boolean(input && input.autoDeploy),
@@ -145,6 +152,8 @@ export async function registerLocalApp(input, existingIds) {
   const found = detectComposeFile(workdir);
   const composeFile = found || 'docker-compose.yml';
   if (!found) warnings.push(noComposeWarning());
+  // Same env_file detection as for clones (see registerApp).
+  const envDetected = detectEnvFiles(workdir, composeFile);
 
   let repoUrl = null;
   let detectedBranch = null;
@@ -173,6 +182,7 @@ export async function registerLocalApp(input, existingIds) {
     workdir,
     branch,
     composeFile,
+    envFile: (input && input.envFile) || envDetected[0] || undefined,
     projectName: id,
     port: input && input.port != null && input.port !== '' ? Number(input.port) : null,
     autoDeploy: Boolean(input && input.autoDeploy),

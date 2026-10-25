@@ -36,7 +36,8 @@ import { tagsForRecord, failedStepOf } from './activity.js';
 import { readDynamicEntries, dynamicExists, saveDynamicEnv, currentInUse } from './dynenv.js';
 import { runOp, BusyError } from './ops.js';
 import { appState } from './store.js';
-import { readEnvFile, saveEnvFile } from './envfile.js';
+import { readEnvFile, saveEnvFile, normalizeEnvRel } from './envfile.js';
+import { detectEnvFiles } from './envdetect.js';
 import { getProvider } from './providers/index.js';
 import { startPollers, watchApp, unwatchApp } from './poller.js';
 import { registerApp, registerLocalApp, isInsideAppsRoot } from './registry.js';
@@ -209,16 +210,40 @@ app.get('/api/apps/:id/logs', async (req, res) => {
   }
 });
 
-// Read one app's .env file (existence, ordered entries, raw text).
-// This is the ONLY endpoint that returns env values.
+// Read one app's env file (existence, ordered entries, raw text).
+// This is the ONLY endpoint that returns env values. The response
+// also lists the env files the app's compose file declares
+// (envFiles, each with exists) and which file the content belongs
+// to (file). ?file=<workdir-relative path> selects another file;
+// without it, when the app's envFile does not exist but a
+// compose-detected one does, the detected file is shown instead
+// (autoSwitched: true) — registrations made before env_file
+// detection existed stay truthful without a registry edit.
 app.get('/api/apps/:id/env', async (req, res) => {
   const a = byId.get(req.params.id);
   if (!a) return res.status(404).json({ error: 'app not found' });
   try {
-    const data = await readEnvFile(a);
-    return res.json({ envFile: a.envFile, ...data });
+    const detected = detectEnvFiles(a.workdir, a.composeFile);
+    const envFiles = detected.map((rel) => ({
+      path: rel,
+      exists: fs.existsSync(path.join(a.workdir, rel)),
+    }));
+    let file = a.envFile || '.env';
+    let autoSwitched = false;
+    if (req.query.file) {
+      file = normalizeEnvRel(a, String(req.query.file));
+    } else if (!fs.existsSync(path.join(a.workdir, file))) {
+      const alt = envFiles.find((f) => f.exists && f.path !== file);
+      if (alt) {
+        file = alt.path;
+        autoSwitched = true;
+      }
+    }
+    const data = await readEnvFile(a, file);
+    return res.json({ envFile: a.envFile, file, envFiles, autoSwitched, ...data });
   } catch (e) {
-    return res.status(500).json({ error: e.message || String(e) });
+    const code = /escapes the app workdir/.test(e.message || '') ? 400 : 500;
+    return res.status(code).json({ error: e.message || String(e) });
   }
 });
 
@@ -235,9 +260,21 @@ app.put('/api/apps/:id/env', async (req, res) => {
   if (appState(a.id).busy) {
     return res.status(409).json({ error: `app ${a.id} is busy, try again later` });
   }
+  // The target file defaults to the app's envFile; body.file (or
+  // ?file=) selects another workdir-relative env file — the same
+  // backup + key-name journal runs per file.
+  const fileParam = (req.body && req.body.file) || req.query.file || null;
+  let rel = a.envFile || '.env';
+  if (fileParam) {
+    try {
+      rel = normalizeEnvRel(a, String(fileParam));
+    } catch (e) {
+      return res.status(400).json({ error: e.message || String(e) });
+    }
+  }
   try {
-    const diff = await saveEnvFile(a, text);
-    return res.json({ ok: true, ...diff });
+    const diff = await saveEnvFile(a, text, rel);
+    return res.json({ ok: true, file: rel, ...diff });
   } catch (e) {
     if (e.badLines) return res.status(400).json({ error: e.message, badLines: e.badLines });
     return res.status(500).json({ error: e.message || String(e) });

@@ -125,7 +125,7 @@ docker compose up -d --build                    # http://localhost:9000
 | `source` | no | `clone` | How the app was added: `clone` (cloned into `APPS_ROOT`) or `local` (a local folder registered in place; never deleted by the manager). |
 | `repoUrl` | no | — | Git remote used for `git ls-remote` polling and Actions watching. Null only for local folders without a git remote — those are managed locally (no watching, Update = rebuild only). |
 | `workdir` | yes | — | Local checkout of the repo on the host. |
-| `envFile` | no | `.env` | .env file path, relative to `workdir`. |
+| `envFile` | no | `.env` | .env file path, relative to `workdir`. At registration, the first `env_file:` entry declared in the app's compose file is adopted when this is not set explicitly. |
 | `branch` | no | `main` | Branch to watch and deploy. |
 | `composeFile` | no | `docker-compose.yml` | Compose file, relative to `workdir`. |
 | `projectName` | no | = id | Compose project name (`-p`). |
@@ -353,7 +353,20 @@ values themselves are resolved live from the two layers below.
 
 ### Static — from the app repo's .env
 
-The file at `<workdir>/<envFile>`, owned by the repo:
+The file at `<workdir>/<envFile>`, owned by the repo. Which file
+that is follows the app's own compose file: at registration the
+manager reads the compose file's `env_file:` declarations
+(short and long syntax) and, when no explicit `envFile` was
+given, adopts the first one — a project keeping its env at
+`server/.env` is registered with `server/.env` automatically.
+When the compose file declares several env files, the panel's
+Static section offers a file switcher (the env endpoints accept
+a `file` parameter, restricted to workdir-relative paths), and
+when a registered `envFile` does not exist but a detected one
+does, the panel — and `GET /api/apps/:id/env` — show the
+detected file instead and say so; the card flags it too. The
+"Currently in use" view always stays based on the app's
+registered `envFile`.
 
 - **Table mode**: one row per variable; keys are read-only, values
   are masked password fields (toggle **Show values** to reveal).

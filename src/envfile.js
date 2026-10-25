@@ -12,14 +12,24 @@ import { appendDeployment } from './deployments.js';
 
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-export function envPathFor(app) {
+export function envPathFor(app, rel) {
   const root = path.resolve(app.workdir);
-  const p = path.resolve(root, app.envFile || '.env');
+  const p = path.resolve(root, rel || app.envFile || '.env');
   // The env file must stay inside the app's workdir.
   if (p !== root && !p.startsWith(root + path.sep)) {
-    throw new Error(`envFile escapes the app workdir: ${app.envFile}`);
+    throw new Error(`env file escapes the app workdir: ${rel || app.envFile}`);
   }
   return p;
+}
+
+// Normalize a caller-supplied env file reference to the
+// workdir-relative path ('/' separators) it resolves to, or
+// throw when it escapes the workdir. Used by the env endpoints'
+// `file` parameter.
+export function normalizeEnvRel(app, rel) {
+  const root = path.resolve(app.workdir);
+  const p = envPathFor(app, rel);
+  return path.relative(root, p).split(path.sep).join('/');
 }
 
 // Classify one line: { type: 'blank' | 'comment' | 'entry' | 'invalid', key?, value? }
@@ -56,8 +66,8 @@ export function invalidLines(text) {
   return bad;
 }
 
-export async function readEnvFile(app) {
-  const p = envPathFor(app);
+export async function readEnvFile(app, rel) {
+  const p = envPathFor(app, rel);
   try {
     const text = await fs.promises.readFile(p, 'utf8');
     return { exists: true, entries: parseEnvText(text), text };
@@ -85,11 +95,14 @@ export function diffEnvKeys(oldEntries, newEntries) {
   return { added, removed, changed };
 }
 
-async function backupCurrent(app, envPath) {
+async function backupCurrent(app, envPath, tag) {
   const dir = path.join(DATA_DIR, 'backups', app.id);
   await fs.promises.mkdir(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const dest = path.join(dir, `${stamp}.env`);
+  // The app's own envFile keeps the historical `<stamp>.env`
+  // name; backups of other files carry a tag so two files saved
+  // in the same second cannot overwrite each other.
+  const dest = path.join(dir, tag ? `${stamp}--${tag}.env` : `${stamp}.env`);
   await fs.promises.copyFile(envPath, dest);
   // Keep only the newest 10 backups (ISO-based names sort by time).
   const files = (await fs.promises.readdir(dir)).filter((f) => f.endsWith('.env')).sort();
@@ -99,21 +112,32 @@ async function backupCurrent(app, envPath) {
   return dest;
 }
 
-// Validate + atomically save the env file (temp file + rename in the
-// same directory), back up the previous version first, and append a
-// kind:"env" deployment record containing key names only.
+// Validate + atomically save an env file (temp file + rename in
+// the same directory), back up the previous version first, and
+// append a kind:"env" deployment record containing key names
+// only. `rel` selects which file (defaults to the app's envFile);
+// when it names a different file the record carries a `file`
+// field — records for the app's own envFile keep their exact
+// historical shape.
 // Throws an error with .badLines for invalid content, .code 'ENOENT'-ish
 // errors propagate as normal errors. Returns the key diff.
-export async function saveEnvFile(app, text) {
+export async function saveEnvFile(app, text, rel) {
   const bad = invalidLines(text);
   if (bad.length) {
     const e = new Error(`invalid env line(s): ${bad.join(', ')}`);
     e.badLines = bad;
     throw e;
   }
-  const envPath = envPathFor(app);
-  const before = await readEnvFile(app);
-  if (before.exists) await backupCurrent(app, envPath);
+  const target = normalizeEnvRel(app, rel);
+  const isMain = target === normalizeEnvRel(app);
+  const envPath = envPathFor(app, target);
+  const before = await readEnvFile(app, target);
+  if (before.exists) {
+    await backupCurrent(app, envPath, isMain ? null : target.replace(/[^A-Za-z0-9]+/g, '_'));
+  }
+  // The target file's directory may not exist yet (saving creates
+  // the file, as the panel promises for a missing env file).
+  await fs.promises.mkdir(path.dirname(envPath), { recursive: true });
   const tmp = `${envPath}.tmp-${process.pid}`;
   await fs.promises.writeFile(tmp, text, 'utf8');
   await fs.promises.rename(tmp, envPath);
@@ -124,6 +148,7 @@ export async function saveEnvFile(app, text) {
     kind: 'env',
     layer: 'static',
     trigger: 'manual',
+    ...(isMain ? {} : { file: target }),
     added: diff.added,
     removed: diff.removed,
     changed: diff.changed,

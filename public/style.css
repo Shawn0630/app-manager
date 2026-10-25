@@ -403,6 +403,19 @@ main { padding: 20px 22px 40px; max-width: 1220px; margin: 0 auto; }
 .dep-steps summary { cursor: pointer; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
 .dep-steps summary:hover { color: var(--blue-dark); }
 
+/* Env panel file switcher (only rendered when the compose file
+   gives the panel a real choice of env files). */
+.env-file-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 2px 0 8px; font-size: 13px; }
+.env-file-bar select {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  background: #fff;
+  margin-left: 6px;
+}
+
 /* Port row note when the registered port disagrees with the
    actual published port (the link itself already points at the
    actual one). */

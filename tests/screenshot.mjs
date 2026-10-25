@@ -109,6 +109,28 @@ async function main() {
   // a "⚠ registered: 9999" note.
   const workdir2 = path.join(WORK, 'app-stale');
   await sh('git', ['clone', remote, workdir2]);
+  // Third app, registered the legacy way (envFile '.env') while
+  // its compose file actually uses server/.env and declares a
+  // second env file: its card shows the env-file hint and its
+  // Environment panel auto-switches to server/.env with the file
+  // switcher visible.
+  const workdir3 = path.join(WORK, 'app-viz');
+  fs.mkdirSync(path.join(workdir3, 'server'), { recursive: true });
+  fs.mkdirSync(path.join(workdir3, 'config'), { recursive: true });
+  fs.writeFileSync(path.join(workdir3, 'docker-compose.yml'), [
+    'services:',
+    '  web:',
+    '    image: nginx:alpine',
+    '    env_file:',
+    '      - server/.env',
+    '      - path: config/app.env',
+    '        required: false',
+    '    ports:',
+    '      - "8088:80"',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(workdir3, 'server/.env'), '# visualizer settings\nVIZ_API_KEY=sk-viz-fixture-987\nDEBUG=false\n');
+  fs.writeFileSync(path.join(workdir3, 'config/app.env'), 'APP_ONLY=1\n');
   fs.mkdirSync(path.join(workdir, 'src'), { recursive: true });
   fs.writeFileSync(path.join(workdir, '.env'), '# demo app settings\nAPP_NAME=demo\nAPI_KEY=sk-demo-123456\nDEBUG=false\n');
   const { stdout: headOut } = await gitC(workdir, ['rev-parse', 'HEAD']);
@@ -145,6 +167,10 @@ async function main() {
     }, {
       id: 'stale-app', name: 'Stale Port App', repoUrl: remote, workdir: workdir2, branch: 'main',
       composeFile: 'docker-compose.yml', projectName: 'staleapp', port: 9999,
+      autoDeploy: false, pollIntervalSec: 3600, provider: 'builtin', envFile: '.env',
+    }, {
+      id: 'viz-app', name: 'Viz App', repoUrl: remote, workdir: workdir3, branch: 'main',
+      composeFile: 'docker-compose.yml', projectName: 'vizapp', port: 8088,
       autoDeploy: false, pollIntervalSec: 3600, provider: 'builtin', envFile: '.env',
     }],
   }, null, 1));
@@ -285,6 +311,22 @@ async function main() {
     await sleep(600);
     await page.screenshot({ path: path.join(WORK, 'dashboard-env.png') });
     console.log('saved dashboard-env.png');
+    await page.evaluate(() => document.getElementById('envClose').click());
+
+    // The Viz App's Environment panel: registered envFile is the
+    // default .env (missing), the compose file declares
+    // server/.env + config/app.env — the panel auto-switches to
+    // server/.env, shows the switcher and the explanatory note,
+    // values masked.
+    await page.evaluate(() => {
+      const btn = [...document.querySelectorAll('button[data-action="env"]')][2];
+      if (btn) btn.click();
+    });
+    await page.waitForSelector('#envModal:not(.hidden) #envFileBar:not(.hidden)', { timeout: 20_000 });
+    await page.waitForSelector('#envModal:not(.hidden) #envRows tr', { timeout: 20_000 });
+    await sleep(600);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-env-multifile.png') });
+    console.log('saved dashboard-env-multifile.png');
     await page.evaluate(() => document.getElementById('envClose').click());
 
     // Activity view: the tag-based stream on its own page.

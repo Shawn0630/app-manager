@@ -1542,6 +1542,135 @@ async function main() {
     await stopManager(mgr); mgr = null;
   }
 
+  // ---------- Phase: compose env_file detection ----------
+  {
+    const post = async (p, body) => {
+      const res = await fetch(BASE + p, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, json: await res.json().catch(() => ({})) };
+    };
+    const put = async (p, body) => {
+      const res = await fetch(BASE + p, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, json: await res.json().catch(() => ({})) };
+    };
+    // Fixture: compose declares env_file in short AND long form;
+    // the real env lives at server/.env; there is NO root .env.
+    const envDir = path.join(WORK, 'envproj');
+    fs.mkdirSync(path.join(envDir, 'server'), { recursive: true });
+    fs.mkdirSync(path.join(envDir, 'config'), { recursive: true });
+    fs.writeFileSync(path.join(envDir, 'docker-compose.yml'), [
+      'services:',
+      '  web:',
+      '    image: alpine',
+      '    env_file:',
+      '      - server/.env',
+      '      - path: config/app.env',
+      '        required: false',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(envDir, 'server/.env'), 'VIZ_KEY=viz-value\nSHARED=from-server\n');
+    fs.writeFileSync(path.join(envDir, 'config/app.env'), 'APP_ONLY=1\n');
+    // Control fixture: an env file exists in a subfolder but the
+    // compose file declares NO env_file — nothing may change.
+    const plainDir = path.join(WORK, 'plainproj');
+    fs.mkdirSync(path.join(plainDir, 'server'), { recursive: true });
+    fs.writeFileSync(path.join(plainDir, 'docker-compose.yml'), 'services:\n  web:\n    image: alpine\n');
+    fs.writeFileSync(path.join(plainDir, 'server/.env'), 'UNDECLARED=1\n');
+
+    const detCfg = path.join(WORK, 'apps.envdetect.json');
+    fs.writeFileSync(detCfg, JSON.stringify({ apps: [] }, null, 1));
+    const detData = path.join(WORK, 'data-envdetect');
+    mgr = startManager({ configPath: detCfg, dataDir: detData });
+    await waitHealth();
+
+    const reg = await post('/api/apps', { source: 'local', path: envDir });
+    check('envdetect: registration adopts the first compose env_file as envFile',
+      reg.status === 201 && reg.json.app && reg.json.app.envFile === 'server/.env',
+      reg.json && reg.json.app && reg.json.app.envFile);
+    const envId = reg.json.app.id;
+
+    const g1 = await api('GET', `/api/apps/${envId}/env`);
+    check('envdetect: GET env reads server/.env and lists both detected files',
+      g1.status === 200 && g1.json.envFile === 'server/.env' && g1.json.file === 'server/.env'
+        && g1.json.autoSwitched === false
+        && JSON.stringify(g1.json.envFiles) === JSON.stringify([
+          { path: 'server/.env', exists: true },
+          { path: 'config/app.env', exists: true },
+        ])
+        && g1.json.entries.some((e) => e.key === 'VIZ_KEY'),
+      g1.json && { file: g1.json.file, envFiles: g1.json.envFiles });
+    const g2 = await api('GET', `/api/apps/${envId}/env?file=${encodeURIComponent('config/app.env')}`);
+    check('envdetect: GET env?file= reads the other declared file',
+      g2.status === 200 && g2.json.file === 'config/app.env'
+        && g2.json.entries.length === 1 && g2.json.entries[0].key === 'APP_ONLY',
+      g2.json && g2.json.file);
+    const gEsc = await api('GET', `/api/apps/${envId}/env?file=${encodeURIComponent('../outside.env')}`);
+    check('envdetect: GET env?file=../… is rejected (400)',
+      gEsc.status === 400, `got ${gEsc.status}`);
+
+    const p1 = await put(`/api/apps/${envId}/env`, { file: 'config/app.env', text: 'APP_ONLY=2\nNEWK=3\n' });
+    check('envdetect: PUT to a named file lands on disk with the key diff',
+      p1.status === 200 && p1.json.file === 'config/app.env'
+        && (p1.json.added || []).join() === 'NEWK'
+        && fs.readFileSync(path.join(envDir, 'config/app.env'), 'utf8') === 'APP_ONLY=2\nNEWK=3\n',
+      p1.json);
+    const deps1 = await api('GET', '/api/deployments?limit=100');
+    const envRecs = (deps1.json.deployments || []).filter((d) => d.appId === envId && d.kind === 'env');
+    check('envdetect: the journal record for a named file carries its file name',
+      envRecs.length >= 1 && envRecs[0].file === 'config/app.env'
+        && (envRecs[0].added || []).join() === 'NEWK',
+      envRecs[0] && { file: envRecs[0].file, added: envRecs[0].added });
+    const backups = fs.readdirSync(path.join(detData, 'backups', envId));
+    check('envdetect: a tagged backup was kept for the named file',
+      backups.some((f) => f.includes('--config_app_env')), backups.join(','));
+
+    const p2 = await put(`/api/apps/${envId}/env`, { text: 'VIZ_KEY=viz-value\nSHARED=changed\n' });
+    const deps2 = await api('GET', '/api/deployments?limit=100');
+    const envRecs2 = (deps2.json.deployments || []).filter((d) => d.appId === envId && d.kind === 'env');
+    check('envdetect: PUT without file still targets the app envFile, record shape unchanged (no file field)',
+      p2.status === 200 && p2.json.file === 'server/.env'
+        && fs.readFileSync(path.join(envDir, 'server/.env'), 'utf8').includes('SHARED=changed')
+        && envRecs2.length >= 2 && !('file' in envRecs2[0])
+        && (envRecs2[0].changed || []).join() === 'SHARED',
+      envRecs2[0]);
+
+    const regPlain = await post('/api/apps', { source: 'local', path: plainDir });
+    const gp = await api('GET', `/api/apps/${regPlain.json.app.id}/env`);
+    check('envdetect: no env_file declared → default .env and an empty candidate list',
+      regPlain.status === 201 && regPlain.json.app.envFile === '.env'
+        && gp.json.file === '.env' && Array.isArray(gp.json.envFiles) && gp.json.envFiles.length === 0
+        && gp.json.autoSwitched === false,
+      gp.json && { envFile: gp.json.envFile, envFiles: gp.json.envFiles });
+
+    // Legacy registration: envFile still the default '.env' in the
+    // registry (what existing users have). After a restart the env
+    // endpoint must auto-switch to the detected file, and the
+    // status must carry the hint for the card.
+    const cfgOnDisk = JSON.parse(fs.readFileSync(detCfg, 'utf8'));
+    cfgOnDisk.apps = cfgOnDisk.apps.map((x) => (x.id === envId ? { ...x, envFile: '.env' } : x));
+    fs.writeFileSync(detCfg, JSON.stringify(cfgOnDisk, null, 1));
+    await stopManager(mgr); mgr = null;
+    mgr = startManager({ configPath: detCfg, dataDir: detData });
+    await waitHealth();
+    const g3 = await api('GET', `/api/apps/${envId}/env`);
+    check('envdetect: legacy registration auto-switches to the detected file',
+      g3.status === 200 && g3.json.autoSwitched === true && g3.json.file === 'server/.env'
+        && g3.json.entries.some((e) => e.key === 'VIZ_KEY'),
+      g3.json && { autoSwitched: g3.json.autoSwitched, file: g3.json.file });
+    const legacy = await getById(envId);
+    check('envdetect: status exposes envFileHint for the card',
+      Boolean(legacy) && legacy.envFileHint === 'server/.env',
+      legacy && legacy.envFileHint);
+    await stopManager(mgr); mgr = null;
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

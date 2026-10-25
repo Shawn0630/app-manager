@@ -1,8 +1,11 @@
 // Assemble the per-app status object served by GET /api/apps.
+import fs from 'node:fs';
+import path from 'node:path';
 import { composePs } from './docker.js';
 import * as git from './git.js';
 import { lastDeploymentFor } from './deployments.js';
 import { appState } from './store.js';
+import { detectEnvFiles } from './envdetect.js';
 
 // The port story has two sources: the port registered for the
 // app (app.port, from Add Project / config) and the port the app
@@ -55,6 +58,17 @@ export async function appStatus(app) {
     : null;
   const behind = Boolean(st.remoteHead && commit && st.remoteHead !== commit.head);
   const { effectivePort, portSource, portMismatch } = effectivePortOf(app, ps.containers);
+  // Restrained env-file hint for the card: the app's registered
+  // envFile does not exist, its compose file declares env_file
+  // entries, and one of those exists — the panel auto-switches to
+  // it; say so on the card too. Null in every other case
+  // (including registrations already fixed to the detected file).
+  let envFileHint = null;
+  const ownEnv = app.envFile || '.env';
+  if (!fs.existsSync(path.join(app.workdir, ownEnv))) {
+    const detected = detectEnvFiles(app.workdir, app.composeFile);
+    envFileHint = detected.find((rel) => rel !== ownEnv && fs.existsSync(path.join(app.workdir, rel))) || null;
+  }
   return {
     id: app.id,
     name: app.name,
@@ -70,6 +84,7 @@ export async function appStatus(app) {
     portSource,
     portMismatch,
     envFile: app.envFile,
+    envFileHint,
     autoDeploy: app.autoDeploy,
     pollIntervalSec: app.pollIntervalSec,
     provider: app.provider,

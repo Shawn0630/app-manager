@@ -170,7 +170,13 @@
         <div id="inUseEmpty" class="muted hidden">No variables in effect.</div>
       </section>
       <section class="env-section">
-        <h3>Static — from the app repo's .env</h3>
+        <h3 id="envStaticTitle">Static — from the app repo's .env</h3>
+        <div id="envFileBar" class="env-file-bar hidden">
+          <label>Env file
+            <select id="envFileSelect"></select>
+          </label>
+          <span id="envFileNote" class="note"></span>
+        </div>
         <div class="env-toolbar">
           <div class="seg">
             <button id="envModeTable" type="button">Table</button>

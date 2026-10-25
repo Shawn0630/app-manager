@@ -221,6 +221,7 @@ function cardHtml(a) {
     </div>
     ${a.warning ? `<div class="alert warn">⚠ ${esc(a.warning)}</div>` : ''}
     ${a.statusError ? `<div class="alert error">Status check failed: ${esc(a.statusError)}</div>` : ''}
+    ${a.envFileHint ? `<div class="alert warn">Compose uses <b>${esc(a.envFileHint)}</b> as its env file — the Environment panel shows that file instead of ${esc(a.envFile || '.env')}.</div>` : ''}
     ${busy ? `<div class="busy-note"><span class="spinner"></span>Working: ${esc(busy)}…</div>` : ''}
     ${a.progress ? progressHtml(a) : ''}
     <div class="rows">
@@ -507,6 +508,10 @@ refresh();
 // Values are masked (password inputs) unless "Show values" is on.
 const envModal = document.getElementById('envModal');
 const envTitle = document.getElementById('envTitle');
+const envStaticTitle = document.getElementById('envStaticTitle');
+const envFileBar = document.getElementById('envFileBar');
+const envFileSelect = document.getElementById('envFileSelect');
+const envFileNote = document.getElementById('envFileNote');
 const envNote = document.getElementById('envNote');
 const envMsg = document.getElementById('envMsg');
 const envRows = document.getElementById('envRows');
@@ -683,28 +688,54 @@ async function saveDyn() {
   refresh();
 }
 
-async function openEnv(id) {
+async function openEnv(id, file) {
   envMsg.textContent = '';
   dynMsg.textContent = '';
   envNote.textContent = 'Loading…';
   inUseMeta.textContent = 'Loading…';
   inUseRows.innerHTML = '';
-  envCtx = { id, envFile: '.env', originalText: '', mode: 'table', inUse: null };
+  envCtx = { id, envFile: '.env', file: '.env', originalText: '', mode: 'table', inUse: null };
   envTitle.textContent = `Environment — ${id}`;
+  envFileBar.classList.add('hidden');
+  envFileNote.textContent = '';
   envModal.classList.remove('hidden');
   const enc = encodeURIComponent(id);
   // The three layers load independently: one failing must not
   // blank the others.
   const [staticRes, dynRes, currentRes] = await Promise.allSettled([
-    api(`/api/apps/${enc}/env`),
+    api(file ? `/api/apps/${enc}/env?file=${encodeURIComponent(file)}` : `/api/apps/${enc}/env`),
     api(`/api/apps/${enc}/env/dynamic`),
     api(`/api/apps/${enc}/env/current`),
   ]);
   if (staticRes.status === 'fulfilled') {
     const data = staticRes.value;
     envCtx.envFile = data.envFile || '.env';
+    envCtx.file = data.file || envCtx.envFile;
     envCtx.originalText = data.text || '';
-    envTitle.textContent = `Environment — ${id} (${envCtx.envFile})`;
+    envTitle.textContent = `Environment — ${id} (${envCtx.file})`;
+    envStaticTitle.textContent = envCtx.file === '.env'
+      ? "Static — from the app repo's .env"
+      : `Static — ${envCtx.file}`;
+    // File switcher: only when the compose file offers a real
+    // choice — several detected files, or the registered file is
+    // missing while a detected one exists (the API then already
+    // auto-switched the view to it). A single-file app keeps the
+    // plain panel, no extra controls.
+    const detected = data.envFiles || [];
+    const options = [...new Set([envCtx.envFile, ...detected.map((f) => f.path)])];
+    const showBar = detected.length > 1 || data.autoSwitched
+      || (detected.length === 1 && detected[0].path !== envCtx.envFile);
+    if (showBar) {
+      envFileSelect.innerHTML = options.map((p) => {
+        const d = detected.find((f) => f.path === p);
+        const suffix = d && !d.exists ? ' (missing)' : '';
+        return `<option value="${esc(p)}" ${p === envCtx.file ? 'selected' : ''}>${esc(p)}${suffix}</option>`;
+      }).join('');
+      envFileNote.textContent = data.autoSwitched
+        ? `The compose file uses ${envCtx.file} — showing that instead of the default ${envCtx.envFile}.`
+        : '';
+      envFileBar.classList.remove('hidden');
+    }
     envNote.textContent = data.exists ? '' : 'File does not exist yet — saving will create it.';
     envRaw.value = data.text || '';
     renderEnvRows(data.entries || []);
@@ -735,7 +766,7 @@ async function saveEnv(redeploy) {
     const res = await fetch(`/api/apps/${encodeURIComponent(envCtx.id)}/env`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, file: envCtx.file }),
     });
     data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -803,6 +834,9 @@ document.getElementById('dynAddRow').addEventListener('click', () => {
 document.getElementById('dynSave').addEventListener('click', saveDyn);
 envModeTableBtn.addEventListener('click', () => setEnvMode('table'));
 envModeRawBtn.addEventListener('click', () => setEnvMode('raw'));
+envFileSelect.addEventListener('change', () => {
+  if (envCtx) openEnv(envCtx.id, envFileSelect.value);
+});
 document.getElementById('envSave').addEventListener('click', () => saveEnv(false));
 document.getElementById('envSaveRedeploy').addEventListener('click', () => saveEnv(true));
 document.getElementById('envClose').addEventListener('click', () => envModal.classList.add('hidden'));
