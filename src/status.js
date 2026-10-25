@@ -90,6 +90,16 @@ export async function appStatus(app) {
     behind,
     lastDeployment: lastDeploymentFor(app.id),
     busy: st.busy,
+    // Live deployment progress (builtin provider), only while the
+    // app is busy running one; null otherwise. doneCount counts
+    // steps that reached a final state (ok or failed).
+    progress: st.busy && st.progress
+      ? {
+        ...st.progress,
+        doneCount: st.progress.steps.filter((s) => s.state === 'ok' || s.state === 'failed').length,
+        totalCount: st.progress.steps.length,
+      }
+      : null,
     lastPollAt: st.lastPollAt,
     lastPollError: st.lastPollError,
     lastActionRun: st.lastActionRun,

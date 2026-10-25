@@ -127,6 +127,48 @@ function portValue(a) {
   return link;
 }
 
+// One step line, shared by the live progress list and the
+// last-deployment step detail: state icon + name + duration.
+function stepLine(icon, cls, name, durationMs) {
+  const dur = durationMs != null ? ` <span class="muted">${esc(fmtDuration(durationMs))}</span>` : '';
+  return `<div class="pstep ${cls}"><span class="picon">${icon}</span><span class="pname">${esc(name)}</span>${dur}</div>`;
+}
+
+// Live deployment progress on the card while a deploy/redeploy
+// runs: a bar (finished steps / total steps), the current step
+// with the elapsed time, and the compact step list. Fed by the
+// status API's progress field on the busy 2 s poll.
+function progressHtml(a) {
+  const p = a.progress;
+  const pct = p.totalCount ? Math.round((p.doneCount / p.totalCount) * 100) : 0;
+  const running = p.steps.find((s) => s.state === 'running');
+  const failed = p.steps.find((s) => s.state === 'failed');
+  const elapsed = Math.max(0, Math.round((Date.now() - new Date(p.startedAt).getTime()) / 1000));
+  const head = failed
+    ? `Failed at: ${esc(failed.name)} · ${elapsed}s`
+    : running
+      ? `${esc(running.name)} · ${elapsed}s elapsed`
+      : `Finishing… · ${elapsed}s elapsed`;
+  const icons = { ok: '✓', failed: '✗', running: '●', pending: '○' };
+  const rows = p.steps.map((s) => stepLine(icons[s.state] || '○', s.state, s.name, s.durationMs)).join('');
+  return `<div class="progress-block">
+    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+    <div class="progress-now">${head}</div>
+    <div class="progress-steps">${rows}</div>
+  </div>`;
+}
+
+// The last deployment's steps, collapsed by default, under its
+// Last deploy row: names, outcomes and per-step durations. The
+// steps' output text stays in the Activity view — not repeated
+// here. Records from before per-step durations existed simply
+// show no duration.
+function depStepsHtml(dep) {
+  if (!dep || !Array.isArray(dep.steps) || !dep.steps.length) return '';
+  const rows = dep.steps.map((s) => stepLine(s.ok ? '✓' : '✗', s.ok ? 'ok' : 'failed', s.name, s.durationMs)).join('');
+  return `<details class="dep-steps"><summary>Steps (${dep.steps.length})</summary>${rows}</details>`;
+}
+
 function actionsValue(a) {
   if (a.trigger !== 'actions' && a.trigger !== 'both') return '';
   if (a.lastActionsError) {
@@ -180,6 +222,7 @@ function cardHtml(a) {
     ${a.warning ? `<div class="alert warn">⚠ ${esc(a.warning)}</div>` : ''}
     ${a.statusError ? `<div class="alert error">Status check failed: ${esc(a.statusError)}</div>` : ''}
     ${busy ? `<div class="busy-note"><span class="spinner"></span>Working: ${esc(busy)}…</div>` : ''}
+    ${a.progress ? progressHtml(a) : ''}
     <div class="rows">
       <div class="row"><span class="k">Port</span><span class="v">${portLink}</span></div>
       ${a.source === 'local' ? `<div class="row"><span class="k">Folder</span><span class="v"><span class="mono">${esc(a.workdir)}</span></span></div>` : ''}
@@ -187,6 +230,7 @@ function cardHtml(a) {
       <div class="row"><span class="k">Remote</span><span class="v">${remoteValue(a)}</span></div>
       ${actionsValue(a) ? `<div class="row"><span class="k">Actions</span><span class="v">${actionsValue(a)}</span></div>` : ''}
       <div class="row"><span class="k">Last deploy</span><span class="v">${deploymentValue(a.lastDeployment)}</span></div>
+      ${depStepsHtml(a.lastDeployment)}
     </div>
     ${containersHtml(a)}
     <div class="buttons">${buttons}</div>

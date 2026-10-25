@@ -14,7 +14,7 @@ import { run, tailText } from '../run.js';
 import * as git from '../git.js';
 import { appendDeployment } from '../deployments.js';
 import { appState } from '../store.js';
-import { prepareDynamicOverride, mergeEnvEntries, writeInUseSnapshot } from '../dynenv.js';
+import { prepareDynamicOverride, mergeEnvEntries, writeInUseSnapshot, readDynamicEntries } from '../dynenv.js';
 import { readEnvFile } from '../envfile.js';
 
 // Shared tail of deploy()/redeploy(): when the run's `up` step
@@ -36,27 +36,62 @@ async function snapshotInUse(app, trigger, dyn) {
   }
 }
 
+// Live progress for the dashboard: at pipeline start the step
+// plan is registered in the app's runtime state, and every step
+// updates its entry as it runs (pending → running → ok/failed,
+// with durationMs). GET /api/apps exposes it while the app is
+// busy; the durable deployment record is still appended at the
+// end exactly as before, its steps carrying the same durationMs.
+function beginProgress(app, kind, trigger, plan) {
+  const st = appState(app.id);
+  st.progress = {
+    kind,
+    trigger,
+    startedAt: new Date().toISOString(),
+    steps: plan.map((name) => ({ name, state: 'pending' })),
+  };
+  const mark = (name, state, durationMs) => {
+    if (!st.progress) return;
+    const s = st.progress.steps.find((x) => x.name === name);
+    if (!s) return;
+    s.state = state;
+    if (durationMs != null) s.durationMs = durationMs;
+  };
+  return {
+    start: (name) => mark(name, 'running'),
+    end: (name, ok, durationMs) => mark(name, ok ? 'ok' : 'failed', durationMs),
+    clear: () => { st.progress = null; },
+  };
+}
+
 // Prepare the dynamic-env override as a recorded pipeline step.
 // With no dynamic entries this is a no-op (no step, no override
 // file). A preparation failure is a failed step and aborts the
 // pipeline: deploying without the requested overrides would be a
 // silent lie.
-async function dynamicStep(app, steps) {
+async function dynamicStep(app, steps, progress) {
+  const t0 = Date.now();
+  if (progress) progress.start('apply dynamic env');
   try {
     const dyn = await prepareDynamicOverride(app);
+    const durationMs = Date.now() - t0;
     if (dyn.dynamicKeys.length) {
       steps.push({
         name: 'apply dynamic env',
         ok: true,
         code: 0,
+        durationMs,
         output: tailText(
           `dynamic overrides for services: ${dyn.services.join(', ')}\nkeys: ${dyn.dynamicKeys.join(', ')}\noverride file: ${dyn.overridePath}`,
         ),
       });
     }
+    if (progress) progress.end('apply dynamic env', true, durationMs);
     return dyn;
   } catch (e) {
-    steps.push({ name: 'apply dynamic env', ok: false, code: e.code ?? null, output: tailText(e.output || e.message) });
+    const durationMs = Date.now() - t0;
+    steps.push({ name: 'apply dynamic env', ok: false, code: e.code ?? null, durationMs, output: tailText(e.output || e.message) });
+    if (progress) progress.end('apply dynamic env', false, durationMs);
     throw e;
   }
 }
@@ -65,6 +100,42 @@ function composeFileArgs(app, dyn) {
   const args = ['compose', '-p', app.projectName, '-f', `${app.workdir}/${app.composeFile}`];
   if (dyn && dyn.overridePath) args.push('-f', dyn.overridePath);
   return args;
+}
+
+// One pipeline step: run the command, append its record entry
+// (now with durationMs), and mirror the outcome into the live
+// progress tracker.
+function makeStep(steps, progress) {
+  return async function step(name, cmd, args, timeout) {
+    if (progress) progress.start(name);
+    const t0 = Date.now();
+    try {
+      const { output } = await run(cmd, args, { timeout });
+      const durationMs = Date.now() - t0;
+      steps.push({ name, ok: true, code: 0, durationMs, output: tailText(output) });
+      if (progress) progress.end(name, true, durationMs);
+    } catch (e) {
+      const durationMs = Date.now() - t0;
+      steps.push({ name, ok: false, code: e.code, durationMs, output: tailText(e.output || e.message) });
+      if (progress) progress.end(name, false, durationMs);
+      throw e;
+    }
+  };
+}
+
+// The step plan for a pipeline, known up front: git steps only
+// for a deploy with a remote; the dynamic-env step only when the
+// app actually has dynamic entries (readDynamicEntries is the
+// same source prepareDynamicOverride consumes, so the plan
+// matches what will really run).
+async function planFor(app, kind, hasRemote) {
+  const names = [];
+  if (kind === 'deploy' && hasRemote) names.push('git fetch', 'git pull --ff-only');
+  const dyn = await readDynamicEntries(app).catch(() => []);
+  if (dyn.length) names.push('apply dynamic env');
+  names.push(kind === 'deploy' ? 'docker compose up -d --build' : 'docker compose up -d (env updated)');
+  names.push('docker compose ps (verify)');
+  return names;
 }
 
 // Check the remote branch HEAD and update the cache. On failure only
@@ -98,20 +169,12 @@ export async function deploy(app, trigger, opts = {}) {
   const from = await git.headOrNull(app.workdir);
   const fromCommit = from ? from.head : null;
 
-  async function step(name, cmd, args, timeout) {
-    try {
-      const { output } = await run(cmd, args, { timeout });
-      steps.push({ name, ok: true, code: 0, output: tailText(output) });
-    } catch (e) {
-      steps.push({ name, ok: false, code: e.code, output: tailText(e.output || e.message) });
-      throw e;
-    }
-  }
-
   // An app without a remote (local folder, no origin) deploys as a
   // plain rebuild: the git steps are skipped entirely rather than
   // failing with a meaningless git error, and the record says so.
   const hasRemote = Boolean(app.repoUrl);
+  const progress = beginProgress(app, 'deploy', trigger, await planFor(app, 'deploy', hasRemote));
+  const step = makeStep(steps, progress);
   let result = 'success';
   let dyn = { overridePath: null, dynamicKeys: [], entries: [] };
   let upOk = false;
@@ -126,7 +189,7 @@ export async function deploy(app, trigger, opts = {}) {
     }
     // Dynamic env overrides are a deployment-time concern: the
     // override file is generated here and added to the up/ps calls.
-    dyn = await dynamicStep(app, steps);
+    dyn = await dynamicStep(app, steps, progress);
     await step(
       'docker compose up -d --build',
       'docker',
@@ -142,6 +205,8 @@ export async function deploy(app, trigger, opts = {}) {
     );
   } catch {
     result = 'failed';
+  } finally {
+    progress.clear();
   }
   if (upOk) await snapshotInUse(app, trigger, dyn);
 
@@ -182,22 +247,14 @@ export async function redeploy(app, trigger) {
   const head = await git.headOrNull(app.workdir);
   const commit = head ? head.head : null;
 
-  async function step(name, cmd, args, timeout) {
-    try {
-      const { output } = await run(cmd, args, { timeout });
-      steps.push({ name, ok: true, code: 0, output: tailText(output) });
-    } catch (e) {
-      steps.push({ name, ok: false, code: e.code, output: tailText(e.output || e.message) });
-      throw e;
-    }
-  }
-
+  const progress = beginProgress(app, 'redeploy', trigger, await planFor(app, 'redeploy', false));
+  const step = makeStep(steps, progress);
   let result = 'success';
   let dyn = { overridePath: null, dynamicKeys: [], entries: [] };
   let upOk = false;
   try {
     // A redeploy is a deployment too: dynamic overrides apply.
-    dyn = await dynamicStep(app, steps);
+    dyn = await dynamicStep(app, steps, progress);
     await step(
       'docker compose up -d (env updated)',
       'docker',
@@ -213,6 +270,8 @@ export async function redeploy(app, trigger) {
     );
   } catch {
     result = 'failed';
+  } finally {
+    progress.clear();
   }
   if (upOk) await snapshotInUse(app, trigger, dyn);
 

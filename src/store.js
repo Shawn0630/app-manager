@@ -12,6 +12,10 @@ export function appState(id) {
       lastActionsAt: null, // ISO timestamp of the last Actions poll
       lastActionsError: null, // most recent Actions poll failure message
       busy: null, // { op, since } | null — an operation is running
+      progress: null, // live deployment progress while a deploy /
+      // redeploy runs: { kind, trigger, startedAt, steps:
+      // [{ name, state: pending|running|ok|failed, durationMs? }] }
+      // — set by the builtin provider, cleared when it finishes.
     });
   }
   return states.get(id);

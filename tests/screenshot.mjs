@@ -162,6 +162,10 @@ async function main() {
       // The folder picker opens at the configured Projects root
       // (the fixture workdir) and shows both quick-jump chips.
       BROWSE_ROOT: workdir,
+      // Slow every fake `up` down so the update below stays in
+      // flight long enough to screenshot the card's live
+      // deployment progress.
+      FAKE_DOCKER_DELAY_MS: '8000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -204,8 +208,47 @@ async function main() {
     // section shows the merged result.
     const dyn = await apiJson('PUT', '/api/apps/demo-app/env/dynamic', { text: 'DEBUG=true\nEXTRA_FLAG=from-dynamic\n' });
     if (dyn.status !== 200) throw new Error(`dynamic save failed: HTTP ${dyn.status}`);
+
+    // Open the dashboard BEFORE triggering the update: with the
+    // fake `up` slowed to 8 s, the card's live deployment
+    // progress (bar + current step + step list) stays on screen
+    // long enough to screenshot mid-flight.
+    browser = await puppeteer.launch({
+      executablePath: '/opt/meta-chromium/chrome',
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-dev-shm-usage', '--window-size=1440,1250', '--no-proxy-server'],
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1440, height: 1250 });
+    await bridge(page);
+    await page.goto(`${BASE}/#/apps`, { waitUntil: 'networkidle0', timeout: 60_000 });
+    await page.waitForSelector('.card', { timeout: 20_000 });
+
     const upd = await api('POST', '/api/apps/demo-app/update');
     if (upd.status !== 202) throw new Error(`update not accepted: HTTP ${upd.status}`);
+    // Wait until the manager reports the slow `up` step running…
+    for (let i = 0; i < 80; i += 1) {
+      const s = await api('GET', '/api/apps');
+      const a = s.json && s.json.apps[0];
+      if (a && a.progress && a.progress.steps.some((x) => x.state === 'running' && x.name.includes('up -d'))) break;
+      await sleep(200);
+    }
+    // …then reload the page (its pre-update load is still on the
+    // 10 s idle poll; a fresh load sees the busy state at once
+    // and polls every 2 s) and wait until the card shows the
+    // progress block with a step actually running.
+    await page.reload({ waitUntil: 'networkidle0', timeout: 60_000 });
+    await page.waitForFunction(
+      () => {
+        const b = document.querySelector('.progress-block');
+        return Boolean(b && b.querySelector('.pstep.running'));
+      },
+      { timeout: 20_000 },
+    );
+    await sleep(150);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-progress.png'), fullPage: true });
+    console.log('saved dashboard-progress.png (deployment in progress)');
+
     let depOk = false;
     for (let i = 0; i < 60; i += 1) {
       const d = await api('GET', '/api/deployments?limit=5');
@@ -222,16 +265,10 @@ async function main() {
       await sleep(300);
     }
 
-    browser = await puppeteer.launch({
-      executablePath: '/opt/meta-chromium/chrome',
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--window-size=1440,1250', '--no-proxy-server'],
-    });
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 1250 });
-    await bridge(page);
-    // Apps view (default route): app cards only.
-    await page.goto(`${BASE}/#/apps`, { waitUntil: 'networkidle0', timeout: 60_000 });
+    // Apps view (default route): the page is already open from
+    // the progress shot; wait for the deployment to clear off the
+    // card, then take the settled shot.
+    await page.waitForFunction(() => !document.querySelector('.progress-block'), { timeout: 30_000 }).catch(() => {});
     await page.waitForSelector('.card', { timeout: 20_000 });
     await sleep(800);
     await page.screenshot({ path: path.join(WORK, 'dashboard.png'), fullPage: true });

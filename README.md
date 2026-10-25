@@ -20,7 +20,15 @@ development).
 - **Actions**: Start, Stop, Restart, Update (pull + rebuild),
   Logs, Check now, Environment (.env editor). One operation per app
   at a time (mutex); long operations run in the background and the
-  UI shows the app as busy.
+  UI shows the app as busy. While a deployment runs, the card
+  shows live progress — a progress bar, the current step with the
+  elapsed time, and the step list — and the last deployment's
+  steps can be expanded on the card (each step with its own
+  duration; full step output stays in Activity). The status API
+  exposes this as `progress` (`{ kind, trigger, startedAt, steps:
+  [{ name, state, durationMs? }], doneCount, totalCount }`, null
+  when not deploying), and deployment records carry a per-step
+  `durationMs`.
 - **Auto-deploy**: two independent trigger sources per app —
   new commits (polled with `git ls-remote`) and GitHub Actions
   (a new **successful** workflow run). The `trigger` field selects

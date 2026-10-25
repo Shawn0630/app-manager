@@ -1473,6 +1473,75 @@ async function main() {
     llmServer.close();
   }
 
+  // ---------- Phase: live deployment progress ----------
+  {
+    // A slowed fake `up` keeps the deployment in flight long
+    // enough to poll the status API mid-run.
+    mgr = startManager({
+      configPath: path.join(WORK, 'apps.manual.json'),
+      dataDir,
+      extraEnv: { FAKE_DOCKER_DELAY_MS: '4000' },
+    });
+    await waitHealth();
+    const upd = await api('POST', '/api/apps/test-app/update');
+    check('progress: update accepted', upd.status === 202, `got ${upd.status}`);
+    const snaps = [];
+    const t0 = Date.now();
+    while (Date.now() - t0 < 45_000) {
+      const a = await getApp();
+      if (a.progress) snaps.push(a.progress);
+      if (!a.busy && snaps.length) break;
+      await sleep(120);
+    }
+    check('progress: in-flight snapshots observed', snaps.length >= 3, `${snaps.length} snapshots`);
+    const s0 = snaps[0] || {};
+    check('progress: shape — kind/trigger/startedAt/totalCount',
+      s0.kind === 'deploy' && s0.trigger === 'manual'
+        && typeof s0.startedAt === 'string' && s0.totalCount === (s0.steps || []).length
+        && s0.totalCount >= 4,
+      JSON.stringify({ kind: s0.kind, trigger: s0.trigger, total: s0.totalCount }));
+    check('progress: doneCount consistent in every snapshot',
+      snaps.every((s) => s.doneCount === s.steps.filter((x) => x.state === 'ok' || x.state === 'failed').length));
+    check('progress: doneCount never goes backwards',
+      snaps.every((s, i) => i === 0 || s.doneCount >= snaps[i - 1].doneCount),
+      snaps.map((s) => s.doneCount).join(','));
+    // test-app carries dynamic entries by this point in the suite,
+    // so the plan is fetch → pull → apply dynamic env → up → ps.
+    // Steps are looked up by name, never by fixed index.
+    const byName = (s, n) => s.steps.find((x) => x.name === n) || {};
+    check('progress: a mid-pipeline step observed running with later steps pending',
+      snaps.some((s) => {
+        const i = s.steps.findIndex((x) => x.state === 'running');
+        return i >= 0 && i < s.steps.length - 1 && s.steps[i + 1].state === 'pending';
+      }),
+      snaps.length ? snaps[0].steps.map((s) => `${s.name}:${s.state}`).join(' | ') : 'none');
+    const upSnap = snaps.find((s) => byName(s, 'docker compose up -d --build').state === 'running');
+    check('progress: up step running with the git steps ok and verify still pending',
+      Boolean(upSnap)
+        && byName(upSnap, 'git fetch').state === 'ok'
+        && byName(upSnap, 'git pull --ff-only').state === 'ok'
+        && byName(upSnap, 'docker compose ps (verify)').state === 'pending',
+      upSnap ? upSnap.steps.map((s) => s.state).join(',') : 'no up-running snapshot');
+    const doneApp = await getApp();
+    check('progress: null again after completion', doneApp.progress === null && !doneApp.busy);
+    const deps = await api('GET', '/api/deployments?limit=100');
+    const mine = (deps.json.deployments || [])
+      .filter((d) => d.appId === 'test-app' && d.kind === 'deploy' && d.trigger === 'manual')
+      .sort((x, y) => (x.ts < y.ts ? -1 : 1));
+    const rec = mine[mine.length - 1];
+    check('progress: the announced plan is exactly what the final record ran',
+      Boolean(rec) && JSON.stringify((s0.steps || []).map((s) => s.name))
+        === JSON.stringify(rec.steps.map((s) => s.name)),
+      rec ? rec.steps.map((s) => s.name).join(' | ') : 'no record');
+    check('progress: final record carries per-step durationMs',
+      Boolean(rec) && rec.steps.every((s) => typeof s.durationMs === 'number'),
+      rec ? rec.steps.map((s) => `${s.name}:${s.durationMs}`).join(' | ') : 'no record');
+    const upStep = rec && rec.steps.find((s) => s.name === 'docker compose up -d --build');
+    check('progress: up step duration reflects the slowed fake up (>= 3000 ms)',
+      Boolean(upStep) && upStep.durationMs >= 3000, upStep && String(upStep.durationMs));
+    await stopManager(mgr); mgr = null;
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

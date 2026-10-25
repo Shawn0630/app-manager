@@ -385,6 +385,24 @@ main { padding: 20px 22px 40px; max-width: 1220px; margin: 0 auto; }
   padding: 1px 6px;
   white-space: nowrap;
 }
+/* Live deployment progress on a card, and the shared step lines
+   (also used by the last deployment's expandable step detail). */
+.progress-block { margin: 10px 0 2px; }
+.progress-bar { height: 6px; background: #e6ebf0; border-radius: 999px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--blue); border-radius: 999px; transition: width .45s ease; }
+.progress-now { font-size: 12.5px; color: var(--muted); margin: 6px 0 4px; }
+.progress-steps { display: flex; flex-direction: column; gap: 2px; }
+.pstep { display: flex; gap: 7px; align-items: baseline; font-size: 12.5px; }
+.pstep .picon { width: 14px; text-align: center; flex: none; }
+.pstep.ok .picon { color: var(--green); }
+.pstep.pending { color: var(--muted); }
+.pstep.running .picon { color: var(--blue); animation: pulse 1s ease-in-out infinite; }
+.pstep.failed { color: var(--red); font-weight: 600; }
+.pstep.failed .picon { color: var(--red); }
+.dep-steps { font-size: 12.5px; margin: 1px 0 5px; display: flex; flex-direction: column; gap: 2px; }
+.dep-steps summary { cursor: pointer; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.dep-steps summary:hover { color: var(--blue-dark); }
+
 /* Port row note when the registered port disagrees with the
    actual published port (the link itself already points at the
    actual one). */
