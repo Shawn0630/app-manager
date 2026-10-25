@@ -24,11 +24,17 @@ export function normalizeApp(raw, idx) {
   if (!raw || typeof raw !== 'object') throw new Error(`apps[${idx}] is not an object`);
   if (!raw.id) throw new Error(`apps[${idx}] is missing id`);
   if (!raw.workdir) throw new Error(`app ${raw.id} is missing workdir`);
-  if (!raw.repoUrl) throw new Error(`app ${raw.id} is missing repoUrl`);
   return {
     id: String(raw.id),
     name: String(raw.name || raw.id),
-    repoUrl: String(raw.repoUrl),
+    // How the app got into the registry: 'clone' (Add Project from
+    // GitHub, cloned into APPS_ROOT) or 'local' (Add Project from a
+    // local folder, registered in place — never copied or deleted).
+    source: raw.source === 'local' ? 'local' : 'clone',
+    // repoUrl is the app's GitHub remote when it has one; a local
+    // folder without a git remote registers with repoUrl = null and
+    // is managed locally only (no polling / Actions / git deploys).
+    repoUrl: raw.repoUrl ? String(raw.repoUrl) : null,
     workdir: String(raw.workdir),
     envFile: String(raw.envFile || '.env'),
     branch: String(raw.branch || 'main'),

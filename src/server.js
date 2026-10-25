@@ -3,8 +3,12 @@
 // Routes:
 //   GET    /api/health
 //   GET    /api/apps                   status of every registered app
-//   POST   /api/apps                   add an app by cloning its repo
-//   DELETE /api/apps/:id[?purge=1]     remove an app (purge: + workdir)
+//   POST   /api/apps                   add a project: clone a repo
+//                                      ({ repoUrl, ... }) or register
+//                                      a local folder in place
+//                                      ({ source: "local", path, ... })
+//   DELETE /api/apps/:id[?purge=1]     remove an app (purge: + workdir,
+//                                      cloned apps inside APPS_ROOT only)
 //   POST   /api/apps/:id/start|stop|restart|update|check|redeploy
 //   GET    /api/apps/:id/logs?tail=200
 //   GET/PUT /api/apps/:id/env            static layer (repo .env)
@@ -28,8 +32,9 @@ import { appState } from './store.js';
 import { readEnvFile, saveEnvFile } from './envfile.js';
 import { getProvider } from './providers/index.js';
 import { startPollers, watchApp, unwatchApp } from './poller.js';
-import { registerApp, isInsideAppsRoot } from './registry.js';
+import { registerApp, registerLocalApp, isInsideAppsRoot } from './registry.js';
 import { refreshRuns } from './actionsWatch.js';
+import { hasGitHubRemote } from './github.js';
 import { clearAppState } from './appstate.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -86,14 +91,20 @@ app.get('/api/apps', async (req, res) => {
   res.json({ apps: out });
 });
 
-// Add App: clone the repo into APPS_ROOT/<id> and register it. Always
-// registered on success (HTTP 201) — clone/compose problems come back
-// as a `warning` on the app instead of an error. Adds are serialized
-// because they mutate the registry file.
+// Add Project, two ways:
+//  - from GitHub: clone the repo into APPS_ROOT/<id> and register it;
+//  - from a local folder ({ source: "local", path }): register an
+//    existing directory in place — nothing is copied or moved.
+// Registration succeeds (HTTP 201) whenever the input is basically
+// valid — clone/compose/no-remote problems come back as a `warning`
+// on the app instead of an error. Adds are serialized because they
+// mutate the registry file.
 let addChain = Promise.resolve();
 app.post('/api/apps', (req, res) => {
+  const body = req.body || {};
+  const register = body.source === 'local' ? registerLocalApp : registerApp;
   const job = addChain.then(async () => {
-    const { app: newApp, warning } = await registerApp(req.body || {}, new Set(apps.map((x) => x.id)));
+    const { app: newApp, warning } = await register(body, new Set(apps.map((x) => x.id)));
     apps.push(newApp);
     byId.set(newApp.id, newApp);
     saveApps(apps);
@@ -108,8 +119,11 @@ app.post('/api/apps', (req, res) => {
 });
 
 // Remove an app from the registry. The workdir is kept unless
-// ?purge=1 is given, and purging is only allowed for workdirs inside
-// APPS_ROOT. The dashboard only uses the plain removal.
+// ?purge=1 is given. Purging is refused for local-folder apps
+// outright (their folder is the user's own directory — removing the
+// app must never delete it), and for cloned apps it is only allowed
+// when the workdir lives inside APPS_ROOT. The dashboard only uses
+// the plain removal.
 app.delete('/api/apps/:id', async (req, res) => {
   const a = byId.get(req.params.id);
   if (!a) return res.status(404).json({ error: 'app not found' });
@@ -117,6 +131,9 @@ app.delete('/api/apps/:id', async (req, res) => {
     return res.status(409).json({ error: `app ${a.id} is busy, try again later` });
   }
   const purge = req.query.purge === '1';
+  if (purge && a.source === 'local') {
+    return res.status(400).json({ error: 'purge refused: local folder apps are never deleted from disk' });
+  }
   if (purge && !isInsideAppsRoot(a.workdir)) {
     return res.status(400).json({ error: 'purge refused: workdir is outside APPS_ROOT' });
   }
@@ -282,10 +299,13 @@ app.post('/api/apps/:id/:action', (req, res) => {
     }
     else if (action === 'check') {
       // Manual refresh of both watch sources (caches only; automatic
-      // deployment decisions happen in the poller ticks).
+      // deployment decisions happen in the poller ticks). Apps
+      // without a remote have nothing to refresh.
       runOp(a, 'check', async () => {
-        await provider.checkRemote(a);
-        if (a.trigger === 'actions' || a.trigger === 'both') await refreshRuns(a);
+        if (a.repoUrl) {
+          await provider.checkRemote(a);
+          if ((a.trigger === 'actions' || a.trigger === 'both') && hasGitHubRemote(a)) await refreshRuns(a);
+        }
       });
     }
   } catch (e) {

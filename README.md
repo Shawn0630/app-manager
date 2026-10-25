@@ -25,9 +25,14 @@ development).
   new commits (polled with `git ls-remote`) and GitHub Actions
   (a new **successful** workflow run). The `trigger` field selects
   `commit`, `actions`, `both`, or `manual`; see below.
-- **Add App from the dashboard**: paste a repo URL and the manager
-  clones it into `APPS_ROOT`, detects the compose file, and
-  registers the app — no config editing or restart needed.
+- **Add Project from the dashboard** (its own page, next to Apps
+  and Activity): paste a repo URL and the manager clones it into
+  `APPS_ROOT`, detects the compose file, and registers the app —
+  or register a **local folder** in place: if it is a git repo
+  with a GitHub remote it gets the full feature set (commit
+  polling, Actions watching, pull-based deploys); without a
+  remote it is managed locally (start / stop / rebuild). No
+  config editing or restart needed either way.
 - **Deploy pipeline**: `git fetch` → `git pull --ff-only` (diverged
   branches fail loudly, nothing is force-pushed) →
   `docker compose up -d --build` → `docker compose ps` to verify.
@@ -105,7 +110,8 @@ docker compose up -d --build                    # http://localhost:9000
 | --- | --- | --- | --- |
 | `id` | yes | — | Unique app id (URLs, records). |
 | `name` | no | = id | Display name. |
-| `repoUrl` | yes | — | Git remote used for `git ls-remote` polling. |
+| `source` | no | `clone` | How the app was added: `clone` (cloned into `APPS_ROOT`) or `local` (a local folder registered in place; never deleted by the manager). |
+| `repoUrl` | no | — | Git remote used for `git ls-remote` polling and Actions watching. Null only for local folders without a git remote — those are managed locally (no watching, Update = rebuild only). |
 | `workdir` | yes | — | Local checkout of the repo on the host. |
 | `envFile` | no | `.env` | .env file path, relative to `workdir`. |
 | `branch` | no | `main` | Branch to watch and deploy. |
@@ -155,30 +161,65 @@ Environment variables for the manager itself:
    a Jenkins job and watch it), register it as `"jenkins"`, and set
    `"provider": "jenkins"` on the app. Nothing else changes.
 
-## Adding apps from the dashboard
+## Adding projects from the dashboard
 
-The **Add App** form at the top of the dashboard takes a repo URL,
-an optional name (default: the repo name), branch, port, trigger
-mode, workflow filter, and the auto-deploy flag. The server then:
+The dashboard has three pages — **Apps**, **Activity**, and
+**Add Project**. The Add Project page offers two ways in; both take
+an optional name, branch, port, trigger mode, workflow filter, and
+the auto-deploy flag, and both append to the registry
+(`CONFIG_PATH` is rewritten atomically, and the new app is polled
+immediately, no restart).
+
+**From GitHub** — paste a repo URL. The server then:
 
 1. derives the app id from the repo name (slugified, de-duplicated),
 2. clones the repo into `APPS_ROOT/<id>` (`git clone --branch`),
 3. looks for a compose file (`docker-compose.yml`, `compose.yml`,
    or `compose.yaml`) in the repo root,
-4. appends the app to the registry — `CONFIG_PATH` is rewritten
-   atomically, and the new app is polled immediately, no restart.
+4. registers the app with `source: "clone"`.
+
+**From a local folder** — give the path of a folder that already
+exists on the machine. It is registered **in place**
+(`source: "local"`, workdir = the folder itself): nothing is
+copied, moved, or cloned. The server detects the compose file the
+same way, and:
+
+- If the folder is the root of a git repository, its
+  `remote.origin.url` is read and stored as the app's `repoUrl`,
+  and the checked-out branch becomes the tracked branch (the form
+  can override it). GitHub remotes are recognized in both
+  `git@github.com:owner/repo.git` and
+  `https://github.com/owner/repo(.git)` shapes. Such an app is
+  indistinguishable from a cloned one afterwards: commit polling,
+  **GitHub Actions watching**, and pull-based deploys all work,
+  because they key off `repoUrl`, not off how the app was added.
+  (A folder merely nested inside some other repo does not count —
+  the folder itself must be the repository root.)
+- Auto-deploy against a local folder pulls and rebuilds **in that
+  folder**, under the same safety rule as everywhere else:
+  `git pull --ff-only` — uncommitted changes are never overwritten,
+  and a conflicting pull fails the deployment instead.
+- If the folder is not a git repo, or the repo has no `origin`
+  remote, the app registers with `repoUrl: null` and a warning on
+  its card: nothing can be watched or pulled, **Update** degrades
+  to a rebuild only (`docker compose up -d --build`, with the git
+  steps skipped and the deployment record noting
+  "no remote — rebuild only"), while Start / Stop / Restart /
+  Logs / Environment work as usual.
 
 Registration is **warning-based**: if the clone fails or no compose
 file is found, the app is still registered and the card shows the
-reason as a warning. Fix the repo, then use Check now / Update; or
-remove the app with the card's **Remove** button. Removal only
+reason as a warning. Fix the problem, then use Check now / Update;
+or remove the app with the card's **Remove** button. Removal only
 touches the registry — the workdir stays on disk. The API also
 supports `DELETE /api/apps/:id?purge=1`, which additionally deletes
-the workdir, but only when it lives inside `APPS_ROOT` (the
+the workdir, but only for cloned apps whose workdir lives inside
+`APPS_ROOT`; for local-folder apps purge is always refused, so a
+user's own directory can never be deleted through the manager (the
 dashboard never purges).
 
-Because Add App rewrites the registry, the config mount in the
-Docker setup is read-write.
+Because adding projects rewrites the registry, the config mount in
+the Docker setup is read-write.
 
 ## GitHub Actions as a trigger
 
@@ -358,7 +399,13 @@ the Actions trigger end to end: run parsing, the baseline rule, a
 successful run deploying, a failed run not deploying, no
 re-triggering after a restart, commit-triggered apps being
 unaffected — plus Add App (clone, registry persistence, warnings)
-and DELETE / purge.
+and DELETE / purge. A further phase covers **local folder
+projects**: registration in place with repoUrl/branch detection
+from a GitHub origin, Actions-triggered deploys into the local
+folder, the diverged-checkout failure semantics (pull fails,
+working tree untouched), no-remote folders (registration warnings,
+rebuild-only Update), and removal safety (purge refused, folders
+never deleted).
 
 ```sh
 npm run test:e2e

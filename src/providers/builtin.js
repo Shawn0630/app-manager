@@ -69,8 +69,10 @@ function composeFileArgs(app, dyn) {
 
 // Check the remote branch HEAD and update the cache. On failure only
 // lastPollError is recorded and null is returned — polling must never
-// crash the process.
+// crash the process. An app without a remote (local folder, no
+// origin) has nothing to check: a quiet no-op, not an error.
 export async function checkRemote(app) {
+  if (!app.repoUrl) return null;
   const st = appState(app.id);
   st.lastPollAt = new Date().toISOString();
   try {
@@ -106,14 +108,22 @@ export async function deploy(app, trigger, opts = {}) {
     }
   }
 
+  // An app without a remote (local folder, no origin) deploys as a
+  // plain rebuild: the git steps are skipped entirely rather than
+  // failing with a meaningless git error, and the record says so.
+  const hasRemote = Boolean(app.repoUrl);
   let result = 'success';
   let dyn = { overridePath: null, dynamicKeys: [], entries: [] };
   let upOk = false;
   try {
-    await step('git fetch', 'git', ['-C', app.workdir, 'fetch', 'origin', app.branch], 120_000);
-    // --ff-only: if local and remote have diverged, fail and record it;
-    // never force-push or overwrite local changes.
-    await step('git pull --ff-only', 'git', ['-C', app.workdir, 'pull', '--ff-only', 'origin', app.branch], 120_000);
+    if (hasRemote) {
+      await step('git fetch', 'git', ['-C', app.workdir, 'fetch', 'origin', app.branch], 120_000);
+      // --ff-only: if local and remote have diverged, fail and record it;
+      // never force-push or overwrite local changes. For a local
+      // folder app this runs in the user's own checkout — the same
+      // rule protects their uncommitted work.
+      await step('git pull --ff-only', 'git', ['-C', app.workdir, 'pull', '--ff-only', 'origin', app.branch], 120_000);
+    }
     // Dynamic env overrides are a deployment-time concern: the
     // override file is generated here and added to the up/ps calls.
     dyn = await dynamicStep(app, steps);
@@ -150,6 +160,7 @@ export async function deploy(app, trigger, opts = {}) {
     dynamicKeys: dyn.dynamicKeys,
     steps,
   };
+  if (!hasRemote) record.note = 'no remote — rebuild only';
   if (opts.workflowRunId != null) record.workflowRunId = opts.workflowRunId;
   if (opts.targetSha) {
     record.targetSha = opts.targetSha;

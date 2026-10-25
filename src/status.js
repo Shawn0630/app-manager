@@ -25,6 +25,7 @@ export async function appStatus(app) {
   return {
     id: app.id,
     name: app.name,
+    source: app.source,
     repoUrl: app.repoUrl,
     branch: app.branch,
     workdir: app.workdir,

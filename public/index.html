@@ -18,49 +18,117 @@
       <button id="refreshBtn" type="button" class="btn btn-light">Refresh</button>
     </div>
   </div>
+  <nav class="mainnav">
+    <a href="#/apps" data-route="apps" class="nav-link">Apps</a>
+    <a href="#/activity" data-route="activity" class="nav-link">Activity</a>
+    <a href="#/add" data-route="add" class="nav-link">Add Project</a>
+  </nav>
 </header>
 <main>
-  <section class="panel addapp">
-    <h2>Add App</h2>
-    <form id="addForm">
-      <label class="field grow">
-        <span>Repository URL</span>
-        <input name="repoUrl" type="text" placeholder="https://github.com/owner/repo" required>
-      </label>
-      <label class="field">
-        <span>Name</span>
-        <input name="name" type="text" placeholder="Default: repo name">
-      </label>
-      <label class="field">
-        <span>Branch</span>
-        <input name="branch" type="text" placeholder="main">
-      </label>
-      <label class="field small">
-        <span>Port</span>
-        <input name="port" type="number" min="1" max="65535" placeholder="8080">
-      </label>
-      <label class="field">
-        <span>Trigger</span>
-        <select name="trigger">
-          <option value="commit">Commits</option>
-          <option value="actions">GitHub Actions</option>
-          <option value="both">Both</option>
-          <option value="manual">Manual only</option>
+  <section id="view-apps" class="view">
+    <div id="apps" class="grid"></div>
+  </section>
+  <section id="view-activity" class="view hidden">
+    <div class="view-head">
+      <h2>Activity</h2>
+      <label class="field-inline">
+        <span>App</span>
+        <select id="historyFilter">
+          <option value="">All apps</option>
         </select>
       </label>
-      <label class="field">
-        <span>Workflow (Actions only)</span>
-        <input name="workflow" type="text" placeholder="Optional">
-      </label>
-      <label class="check"><input type="checkbox" name="autoDeploy"> Auto-deploy</label>
-      <button type="submit" class="btn btn-primary">Add App</button>
-      <span id="addMsg" class="muted"></span>
-    </form>
-  </section>
-  <section id="apps" class="grid"></section>
-  <section class="history">
-    <h2>Activity</h2>
+    </div>
     <div id="history"></div>
+  </section>
+  <section id="view-add" class="view hidden">
+    <div class="addgrid">
+      <section class="panel addapp">
+        <h2>Add Project — from GitHub</h2>
+        <p class="note">The repository is cloned into the manager's apps folder,
+          then managed like any other app.</p>
+        <form id="addForm">
+          <label class="field grow">
+            <span>Repository URL</span>
+            <input name="repoUrl" type="text" placeholder="https://github.com/owner/repo" required>
+          </label>
+          <label class="field">
+            <span>Name</span>
+            <input name="name" type="text" placeholder="Default: repo name">
+          </label>
+          <label class="field">
+            <span>Branch</span>
+            <input name="branch" type="text" placeholder="main">
+          </label>
+          <label class="field small">
+            <span>Port</span>
+            <input name="port" type="number" min="1" max="65535" placeholder="8080">
+          </label>
+          <label class="field">
+            <span>Trigger</span>
+            <select name="trigger">
+              <option value="commit">Commits</option>
+              <option value="actions">GitHub Actions</option>
+              <option value="both">Both</option>
+              <option value="manual">Manual only</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Workflow (Actions only)</span>
+            <input name="workflow" type="text" placeholder="Optional">
+          </label>
+          <label class="check"><input type="checkbox" name="autoDeploy"> Auto-deploy</label>
+          <button type="submit" class="btn btn-primary">Add Project</button>
+          <span id="addMsg" class="muted"></span>
+        </form>
+      </section>
+      <section class="panel addapp">
+        <h2>Add Project — from a local folder</h2>
+        <p class="note">Register a folder that already exists on this machine. It is
+          managed <b>in place</b> — nothing is copied or moved, and removing the
+          project later only unregisters it; the folder is never deleted.</p>
+        <form id="localForm">
+          <label class="field grow">
+            <span>Folder path</span>
+            <input name="path" type="text" placeholder="/Users/you/Projects/my-app" required>
+          </label>
+          <label class="field">
+            <span>Name</span>
+            <input name="name" type="text" placeholder="Default: folder name">
+          </label>
+          <label class="field">
+            <span>Branch</span>
+            <input name="branch" type="text" placeholder="Detected from the repo">
+          </label>
+          <label class="field small">
+            <span>Port</span>
+            <input name="port" type="number" min="1" max="65535" placeholder="8080">
+          </label>
+          <label class="field">
+            <span>Trigger</span>
+            <select name="trigger">
+              <option value="commit">Commits</option>
+              <option value="actions">GitHub Actions</option>
+              <option value="both">Both</option>
+              <option value="manual">Manual only</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Workflow (Actions only)</span>
+            <input name="workflow" type="text" placeholder="Optional">
+          </label>
+          <label class="check"><input type="checkbox" name="autoDeploy"> Auto-deploy</label>
+          <button type="submit" class="btn btn-primary">Add Project</button>
+          <span id="localMsg" class="muted"></span>
+        </form>
+        <p class="note">If the folder is a git repository with a GitHub remote, it gets the
+          full feature set — commit polling, GitHub Actions watching and pull-based
+          deploys — just like a cloned project. Auto-deploy pulls and rebuilds
+          <b>in this folder</b>: uncommitted changes are never overwritten — a
+          conflicting pull fails the deployment instead. Without a git remote the
+          project can still be started, stopped and rebuilt, but nothing can be
+          watched or pulled.</p>
+      </section>
+    </div>
   </section>
 </main>
 <div id="logModal" class="modal hidden">

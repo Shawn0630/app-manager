@@ -826,6 +826,218 @@ async function main() {
     await stopManager(mgr);
   }
 
+  // ---- Phase 8: local folder projects ----
+  // A local folder is registered IN PLACE. When it is a git repo
+  // with a GitHub origin it must behave exactly like a cloned app —
+  // including Actions-triggered deploys. The origin URL is a real
+  // github.com URL; an insteadOf rewrite in the repo's own config
+  // points git transport at a local bare repo so everything stays
+  // on this machine (the manager itself needs no such help: the
+  // Actions API is mocked, fetch/pull run inside the workdir).
+  const GH_URL = 'https://github.com/test-owner/test-repo.git';
+  const remote8 = path.join(WORK, 'remote8.git');
+  const seed8 = path.join(WORK, 'seed8');
+  const localGh = path.join(WORK, 'local-gh');
+  await sh('git', ['init', '--bare', '-b', 'main', remote8]);
+  await sh('git', ['init', '-b', 'main', seed8]);
+  await gitC(seed8, ['config', 'user.name', 'Verify Bot']);
+  await gitC(seed8, ['config', 'user.email', 'verify@example.com']);
+  fs.writeFileSync(path.join(seed8, 'docker-compose.yml'), [
+    'services:',
+    '  web:',
+    '    image: nginx:alpine',
+    '    ports:',
+    '      - "8095:80"',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(seed8, 'app.txt'), 'g1\n');
+  await gitC(seed8, ['add', '.']);
+  await gitC(seed8, ['-c', 'commit.gpgsign=false', 'commit', '-m', 'g1 initial']);
+  await gitC(seed8, ['remote', 'add', 'origin', remote8]);
+  await gitC(seed8, ['push', 'origin', 'main']);
+  const g1 = (await gitC(seed8, ['rev-parse', 'HEAD'])).stdout.trim();
+  // The "user's own checkout": a normal clone whose origin is then
+  // repointed at GitHub, with insteadOf keeping transport local.
+  await sh('git', ['clone', remote8, localGh]);
+  await gitC(localGh, ['config', 'user.name', 'Verify Bot']);
+  await gitC(localGh, ['config', 'user.email', 'verify@example.com']);
+  await gitC(localGh, ['remote', 'set-url', 'origin', GH_URL]);
+  await gitC(localGh, ['config', `url.${remote8}.insteadOf`, GH_URL]);
+
+  const localPlain = path.join(WORK, 'local-plain');
+  fs.mkdirSync(localPlain, { recursive: true });
+  fs.writeFileSync(path.join(localPlain, 'docker-compose.yml'), 'services:\n  web:\n    image: nginx:alpine\n');
+  fs.writeFileSync(path.join(localPlain, 'keep.txt'), 'do not delete\n');
+  const localNoOrigin = path.join(WORK, 'local-no-origin');
+  await sh('git', ['init', '-b', 'main', localNoOrigin]);
+  await gitC(localNoOrigin, ['config', 'user.name', 'Verify Bot']);
+  await gitC(localNoOrigin, ['config', 'user.email', 'verify@example.com']);
+  fs.writeFileSync(path.join(localNoOrigin, 'docker-compose.yml'), 'services:\n  web:\n    image: nginx:alpine\n');
+  fs.writeFileSync(path.join(localNoOrigin, 'keep.txt'), 'do not delete\n');
+  await gitC(localNoOrigin, ['add', '.']);
+  await gitC(localNoOrigin, ['-c', 'commit.gpgsign=false', 'commit', '-m', 'init']);
+
+  const mock8 = { runs: [] };
+  const mockServer8 = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://mock');
+    if (/^\/repos\/[^/]+\/[^/]+\/actions\/runs$/.test(u.pathname)) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ total_count: mock8.runs.length, workflow_runs: mock8.runs }));
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end('{"message":"not found"}');
+    }
+  });
+  await new Promise((resolve) => mockServer8.listen(0, '127.0.0.1', resolve));
+  const mkRun8 = (id, conclusion, sha) => ({
+    id, name: 'CI', path: '.github/workflows/ci.yml', status: 'completed', conclusion,
+    head_sha: sha, head_branch: 'main', event: 'push',
+    html_url: `https://github.com/test-owner/test-repo/actions/runs/${id}`,
+    updated_at: new Date().toISOString(),
+  });
+  const localCfg = path.join(WORK, 'apps.local.json');
+  fs.writeFileSync(localCfg, JSON.stringify({ apps: [] }, null, 1));
+  const data8 = path.join(WORK, 'data-local');
+  const appsRoot8 = path.join(WORK, 'apps-root-local');
+  const postApp = async (body) => {
+    const res = await fetch(`${BASE}/api/apps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, json: await res.json().catch(() => ({})) };
+  };
+  const getById = async (id) => {
+    const r = await api('GET', '/api/apps');
+    return r.json.apps.find((x) => x.id === id);
+  };
+  const depsOf = async (id) => {
+    const r = await api('GET', '/api/deployments?limit=100');
+    return r.json.deployments.filter((d) => d.appId === id);
+  };
+  mgr = startManager({
+    configPath: localCfg,
+    dataDir: data8,
+    extraEnv: { GITHUB_API_URL: `http://127.0.0.1:${mockServer8.address().port}`, APPS_ROOT: appsRoot8 },
+  });
+  try {
+    await waitHealth();
+
+    // -- Registration: GitHub-connected local folder --
+    const reg = await postApp({
+      source: 'local', path: localGh, trigger: 'actions', autoDeploy: true, pollIntervalSec: 2,
+    });
+    check('local register: 201, no warning',
+      reg.status === 201 && reg.json.app && !reg.json.warning, reg.json);
+    check('local register: source=local, workdir is the folder itself',
+      reg.json.app.source === 'local' && reg.json.app.workdir === localGh,
+      { source: reg.json.app.source, workdir: reg.json.app.workdir });
+    check('local register: repoUrl parsed from origin, branch detected',
+      reg.json.app.repoUrl === GH_URL && reg.json.app.branch === 'main',
+      { repoUrl: reg.json.app.repoUrl, branch: reg.json.app.branch });
+    const cfgDisk = JSON.parse(fs.readFileSync(localCfg, 'utf8'));
+    check('local register: persisted to the registry with source + repoUrl',
+      cfgDisk.apps.some((x) => x.id === 'local-gh' && x.source === 'local' && x.repoUrl === GH_URL),
+      cfgDisk.apps.map((x) => x.id));
+    let la = await getById('local-gh');
+    check('local status: commit + source visible',
+      Boolean(la) && la.commit && la.commit.head === g1 && la.source === 'local',
+      la && { commit: la.commit && la.commit.head, source: la.source });
+
+    // -- Actions watching works for the local app --
+    mock8.runs = [mkRun8(201, 'success', g1)];
+    await waitFor('local actions run visible', async () => {
+      const x = await getById('local-gh');
+      return x && x.lastActionRun && x.lastActionRun.id === 201 ? x : false;
+    }, 20_000);
+    await sleep(5000);
+    check('local actions: baseline run does not deploy', (await depsOf('local-gh')).length === 0);
+    const g2 = await pushVersion(seed8, 'g2 change');
+    mock8.runs = [mkRun8(202, 'success', g2), mkRun8(201, 'success', g1)];
+    const dep202 = await waitFor('local actions-triggered deployment', async () => {
+      const ds = await depsOf('local-gh');
+      return ds.find((d) => d.trigger === 'actions') || false;
+    }, 30_000);
+    check('local actions: successful run deploys the local folder',
+      dep202.result === 'success' && dep202.workflowRunId === 202 && dep202.toCommit === g2,
+      { result: dep202.result, run: dep202.workflowRunId, to: dep202.toCommit });
+    check('local actions: workdir pulled to the run commit',
+      (await gitC(localGh, ['rev-parse', 'HEAD'])).stdout.trim() === g2);
+    await sleep(5000);
+    check('local actions: the same run is not consumed twice',
+      (await depsOf('local-gh')).filter((d) => d.trigger === 'actions').length === 1);
+
+    // -- Diverged local checkout: --ff-only fails, work untouched --
+    fs.writeFileSync(path.join(localGh, 'app.txt'), 'local edit\n');
+    await gitC(localGh, ['commit', '-a', '-m', 'local edit']);
+    const localHead = (await gitC(localGh, ['rev-parse', 'HEAD'])).stdout.trim();
+    await pushVersion(seed8, 'g3 change');
+    const updLocal = await api('POST', '/api/apps/local-gh/update');
+    check('local diverged: manual update accepted', updLocal.status === 202, updLocal.status);
+    const failDep = await waitFor('local diverged deployment record', async () => {
+      const ds = await depsOf('local-gh');
+      return ds.find((d) => d.trigger === 'manual' && d.result === 'failed') || false;
+    }, 30_000);
+    check('local diverged: deploy failed at the pull step',
+      failDep.failedStep === 'git pull --ff-only' || Boolean(failDep.steps.find((s) => !s.ok && s.name === 'git pull --ff-only')),
+      failDep.steps.map((s) => `${s.name}:${s.ok}`));
+    check('local diverged: working tree and HEAD untouched',
+      fs.readFileSync(path.join(localGh, 'app.txt'), 'utf8') === 'local edit\n'
+        && (await gitC(localGh, ['rev-parse', 'HEAD'])).stdout.trim() === localHead);
+
+    // -- Registration: folder without git / repo without origin --
+    const regPlain = await postApp({ source: 'local', path: localPlain });
+    check('local plain folder: registered with a no-git warning',
+      regPlain.status === 201 && regPlain.json.app.repoUrl === null
+        && typeof regPlain.json.warning === 'string' && regPlain.json.warning.includes('not a git repository'),
+      regPlain.json);
+    const regNoOrigin = await postApp({ source: 'local', path: localNoOrigin });
+    check('local git repo without origin: registered with an origin warning',
+      regNoOrigin.status === 201 && regNoOrigin.json.app.repoUrl === null
+        && typeof regNoOrigin.json.warning === 'string' && regNoOrigin.json.warning.includes('origin'),
+      regNoOrigin.json);
+    const regBad = await postApp({ source: 'local', path: path.join(WORK, 'does-not-exist') });
+    check('local register: missing folder -> 400', regBad.status === 400, regBad.status);
+
+    // -- Update on a no-remote local app: rebuild only, no git error --
+    const updPlain = await api('POST', '/api/apps/local-plain/update');
+    check('local plain: update accepted', updPlain.status === 202, updPlain.status);
+    const plainDep = await waitFor('local plain deployment record', async () => {
+      const ds = await depsOf('local-plain');
+      return ds.find((d) => d.kind === 'deploy') || false;
+    }, 30_000);
+    check('local plain: deploy succeeds as rebuild-only (note, no git steps)',
+      plainDep.result === 'success'
+        && typeof plainDep.note === 'string' && plainDep.note.includes('no remote')
+        && !plainDep.steps.some((s) => s.name.startsWith('git ')),
+      { result: plainDep.result, note: plainDep.note, steps: plainDep.steps.map((s) => s.name) });
+    const plainCalls = fs.readFileSync(path.join(WORK, 'fake-calls.log'), 'utf8');
+    check('local plain: compose up --build ran for its project',
+      plainCalls.split('\n').some((l) => l.includes('"local-plain"') && l.includes('"up","-d","--build"')));
+
+    // -- Removal safety: local folders are never deleted --
+    const purge1 = await fetch(`${BASE}/api/apps/local-gh?purge=1`, { method: 'DELETE' });
+    check('local purge refused (400)', purge1.status === 400, purge1.status);
+    const purge2 = await fetch(`${BASE}/api/apps/local-no-origin?purge=1`, { method: 'DELETE' });
+    check('local no-origin purge refused (400)', purge2.status === 400, purge2.status);
+    check('local folders intact after purge attempts',
+      fs.readFileSync(path.join(localGh, 'app.txt'), 'utf8') === 'local edit\n'
+        && fs.readFileSync(path.join(localNoOrigin, 'keep.txt'), 'utf8') === 'do not delete\n');
+    const delPlain = await fetch(`${BASE}/api/apps/local-plain`, { method: 'DELETE' });
+    check('local plain removal ok', delPlain.status === 200, delPlain.status);
+    check('removed local folder and its files still on disk',
+      fs.existsSync(path.join(localPlain, 'docker-compose.yml'))
+        && fs.readFileSync(path.join(localPlain, 'keep.txt'), 'utf8') === 'do not delete\n');
+    const cfgAfterLocal = JSON.parse(fs.readFileSync(localCfg, 'utf8'));
+    check('registry no longer lists the removed local app',
+      !cfgAfterLocal.apps.some((x) => x.id === 'local-plain')
+        && cfgAfterLocal.apps.some((x) => x.id === 'local-gh'),
+      cfgAfterLocal.apps.map((x) => x.id));
+  } finally {
+    await stopManager(mgr);
+    mockServer8.close();
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

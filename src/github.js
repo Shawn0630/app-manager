@@ -19,6 +19,14 @@ export function parseRepo(repoUrl) {
   return null;
 }
 
+// True when the app has a repoUrl that points at GitHub — the
+// precondition for Actions watching (commit polling only needs any
+// repoUrl). Local-folder apps whose origin is GitHub satisfy this
+// exactly like cloned apps do.
+export function hasGitHubRemote(app) {
+  return Boolean(app && parseRepo(app.repoUrl));
+}
+
 function normalizeRun(r) {
   return {
     id: r.id,

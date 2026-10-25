@@ -207,11 +207,12 @@ async function main() {
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 1250 });
     await bridge(page);
-    await page.goto(`${BASE}/`, { waitUntil: 'networkidle0', timeout: 60_000 });
+    // Apps view (default route): app cards only.
+    await page.goto(`${BASE}/#/apps`, { waitUntil: 'networkidle0', timeout: 60_000 });
     await page.waitForSelector('.card', { timeout: 20_000 });
     await sleep(800);
     await page.screenshot({ path: path.join(WORK, 'dashboard.png'), fullPage: true });
-    console.log('saved dashboard.png');
+    console.log('saved dashboard.png (Apps view)');
 
     // Open the Environment editor and screenshot it (all three
     // sections populated, values masked by default).
@@ -224,10 +225,25 @@ async function main() {
     await sleep(600);
     await page.screenshot({ path: path.join(WORK, 'dashboard-env.png') });
     console.log('saved dashboard-env.png');
-
-    // Narrow viewport: cards must collapse to a single column
-    // without horizontal overflow.
     await page.evaluate(() => document.getElementById('envClose').click());
+
+    // Activity view: the tag-based stream on its own page.
+    await page.evaluate(() => { location.hash = '#/activity'; });
+    await page.waitForSelector('#view-activity:not(.hidden) .hist-row', { timeout: 20_000 });
+    await sleep(600);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-activity.png'), fullPage: true });
+    console.log('saved dashboard-activity.png (Activity view)');
+
+    // Add Project view: both forms.
+    await page.evaluate(() => { location.hash = '#/add'; });
+    await page.waitForSelector('#view-add:not(.hidden) #localForm', { timeout: 20_000 });
+    await sleep(600);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-add.png'), fullPage: true });
+    console.log('saved dashboard-add.png (Add Project view)');
+
+    // Narrow viewport on the Apps view: cards must collapse to a
+    // single column without horizontal overflow.
+    await page.evaluate(() => { location.hash = '#/apps'; });
     await page.setViewport({ width: 420, height: 900 });
     await sleep(600);
     await page.screenshot({ path: path.join(WORK, 'dashboard-mobile.png'), fullPage: true });

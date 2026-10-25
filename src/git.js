@@ -1,4 +1,6 @@
 // Read-only git queries + ls-remote.
+import fs from 'node:fs';
+import path from 'node:path';
 import { run } from './run.js';
 
 // Local HEAD info: { head, short, time, subject }.
@@ -14,6 +16,54 @@ export async function localHead(workdir) {
 export async function headOrNull(workdir) {
   try {
     return await localHead(workdir);
+  } catch {
+    return null;
+  }
+}
+
+// Is this directory the ROOT of a git work tree? Deliberately
+// stricter than "inside some work tree": a folder nested inside an
+// unrelated parent repo must not inherit that repo's remote/branch
+// (its origin is not the folder's own GitHub connection).
+export async function isGitRepo(workdir) {
+  try {
+    const { stdout } = await run('git', ['-C', workdir, 'rev-parse', '--show-toplevel'], { timeout: 15_000 });
+    const top = stdout.trim();
+    if (!top) return false;
+    const real = (p) => {
+      try {
+        return fs.realpathSync(p);
+      } catch {
+        return path.resolve(p);
+      }
+    };
+    return real(top) === real(workdir);
+  } catch {
+    return false;
+  }
+}
+
+// The configured URL of the given remote (default "origin"), read
+// from remote.<name>.url as-is — NOT via `git remote get-url`, which
+// would substitute url.*.insteadOf rewrites and hide the GitHub URL
+// the user actually configured. Null when there is no such remote /
+// the directory is not a git repo.
+export async function remoteUrl(workdir, remote = 'origin') {
+  try {
+    const { stdout } = await run('git', ['-C', workdir, 'config', '--get', `remote.${remote}.url`], { timeout: 15_000 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// The checked-out branch name, or null when HEAD is detached or the
+// directory is not a git repo.
+export async function currentBranch(workdir) {
+  try {
+    const { stdout } = await run('git', ['-C', workdir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 15_000 });
+    const b = stdout.trim();
+    return b && b !== 'HEAD' ? b : null;
   } catch {
     return null;
   }

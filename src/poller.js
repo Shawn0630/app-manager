@@ -12,6 +12,7 @@ import { getProvider } from './providers/index.js';
 import { appState } from './store.js';
 import { runOp, BusyError } from './ops.js';
 import { refreshRuns, evaluateActionsTrigger } from './actionsWatch.js';
+import { hasGitHubRemote } from './github.js';
 import * as git from './git.js';
 
 const watchers = new Map(); // appId -> { timers: [...] }
@@ -20,6 +21,13 @@ async function tick(app) {
   const st = appState(app.id);
   const trigger = app.trigger || 'commit';
   const provider = getProvider(app.provider);
+
+  // Nothing to watch without a remote: a local folder with no
+  // repoUrl can only be driven manually. (Actions additionally
+  // requires the remote to be a GitHub URL; commit polling works
+  // with any remote, including a local folder whose origin is
+  // GitHub.)
+  if (!app.repoUrl) return;
 
   if (trigger === 'commit' || trigger === 'both') {
     await provider.checkRemote(app);
@@ -35,7 +43,7 @@ async function tick(app) {
       }
     }
   }
-  if (trigger === 'actions' || trigger === 'both') {
+  if ((trigger === 'actions' || trigger === 'both') && hasGitHubRemote(app)) {
     await refreshRuns(app);
     await evaluateActionsTrigger(app);
   }

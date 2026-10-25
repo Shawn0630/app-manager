@@ -1,5 +1,10 @@
 // App Manager dashboard. Plain fetch + innerHTML rendering, no framework.
 //
+// Three views in one page, switched by hash routing:
+//   #/apps (default) — the app card grid
+//   #/activity       — the activity stream (with an app filter)
+//   #/add            — Add Project (from GitHub / from a local folder)
+//
 // Refresh design (this used to be the "status never updates" bug
 // surface, so it is deliberately defensive):
 //  - apps and deployments are fetched independently; one failing
@@ -9,6 +14,8 @@
 //  - polling adapts: 2 s while any app is busy, 10 s when idle, plus
 //    an immediate refresh right after an action is posted — so the
 //    busy -> done transition appears without waiting out a cycle.
+//  - the activity stream is only fetched while its view is active
+//    (and immediately when the view is entered).
 const $ = (id) => document.getElementById(id);
 const appsEl = $('apps');
 const historyEl = $('history');
@@ -75,6 +82,7 @@ function deploymentValue(dep) {
 }
 
 function remoteValue(a) {
+  if (!a.repoUrl) return '<span class="muted">no GitHub remote</span>';
   if (a.lastPollError && !a.remote) {
     return `<span class="err">check failed: ${esc(a.lastPollError)}</span>`;
   }
@@ -126,7 +134,9 @@ function cardHtml(a) {
     : '—';
   const commitLine = a.commit
     ? `<span class="hash">${esc(a.commit.short)}</span> <span class="subject">${esc(a.commit.subject || '')}</span>`
-    : `<span class="err">${esc(a.commitError || 'unavailable')}</span>`;
+    : a.source === 'local' && !a.repoUrl
+      ? '<span class="muted">not a git repository</span>'
+      : `<span class="err">${esc(a.commitError || 'unavailable')}</span>`;
   const btn = (action, label, cls = '') =>
     `<button type="button" class="${cls}" data-action="${action}" data-id="${esc(a.id)}" ${disabled}>${label}</button>`;
   const buttons = [
@@ -145,6 +155,7 @@ function cardHtml(a) {
       <span class="dot ${esc(a.state)}"></span>
       <span class="name">${esc(a.name)}</span>
       ${statePill(a)}
+      ${a.source === 'local' ? '<span class="badge local no-dot">local folder</span>' : ''}
       ${a.autoDeploy ? '<span class="badge auto no-dot">auto-deploy on</span>' : '<span class="badge no-dot">auto-deploy off</span>'}
       ${a.trigger && a.trigger !== 'commit' ? `<span class="badge no-dot">trigger: ${esc(a.trigger)}</span>` : ''}
       <span class="checked">checked ${esc(fmtClock(a.statusCheckedAt))}</span>
@@ -154,6 +165,7 @@ function cardHtml(a) {
     ${busy ? `<div class="busy-note"><span class="spinner"></span>Working: ${esc(busy)}…</div>` : ''}
     <div class="rows">
       <div class="row"><span class="k">Port</span><span class="v">${portLink}</span></div>
+      ${a.source === 'local' ? `<div class="row"><span class="k">Folder</span><span class="v"><span class="mono">${esc(a.workdir)}</span></span></div>` : ''}
       <div class="row"><span class="k">Commit</span><span class="v">${commitLine}</span></div>
       <div class="row"><span class="k">Remote</span><span class="v">${remoteValue(a)}</span></div>
       ${actionsValue(a) ? `<div class="row"><span class="k">Actions</span><span class="v">${actionsValue(a)}</span></div>` : ''}
@@ -281,10 +293,30 @@ function historyRow(d) {
   </div>`;
 }
 
+let lastDeployments = [];
+
 function renderHistory(deployments) {
-  historyEl.innerHTML = deployments.length
-    ? `<div class="hist-list">${deployments.map(historyRow).join('')}</div>`
+  lastDeployments = deployments || lastDeployments;
+  const filterEl = $('historyFilter');
+  const filter = filterEl ? filterEl.value : '';
+  const rows = filter
+    ? lastDeployments.filter((d) => d.appId === filter)
+    : lastDeployments;
+  historyEl.innerHTML = rows.length
+    ? `<div class="hist-list">${rows.map(historyRow).join('')}</div>`
     : '<div class="empty">No activity yet.</div>';
+}
+
+// Keep the Activity app filter's options in sync with the registry,
+// preserving the current selection across refreshes.
+function syncHistoryFilter(apps) {
+  const filterEl = $('historyFilter');
+  if (!filterEl) return;
+  const current = filterEl.value;
+  const ids = [...new Set(apps.map((a) => a.id))].sort();
+  const wanted = `<option value="">All apps</option>${ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('')}`;
+  if (filterEl.innerHTML !== wanted) filterEl.innerHTML = wanted;
+  if (ids.includes(current) || current === '') filterEl.value = current;
 }
 
 let pollTimer = null;
@@ -302,21 +334,23 @@ async function refresh() {
   }
   refreshInFlight = true;
   try {
-    const [appsRes, depsRes] = await Promise.allSettled([
-      api('/api/apps'),
-      api('/api/deployments?limit=30'),
-    ]);
+    // The activity stream is only fetched while the Activity view
+    // is active (entering the view triggers a refresh of its own).
+    const jobs = [api('/api/apps')];
+    if (currentRoute() === 'activity') jobs.push(api('/api/deployments?limit=100'));
+    const [appsRes, depsRes] = await Promise.allSettled(jobs);
     let anyBusy = false;
     if (appsRes.status === 'fulfilled') {
       const apps = appsRes.value.apps || [];
       anyBusy = apps.some((a) => a.busy);
       renderSummary(apps);
       renderApps(apps);
+      syncHistoryFilter(apps);
     }
-    if (depsRes.status === 'fulfilled') {
+    if (depsRes && depsRes.status === 'fulfilled') {
       renderHistory(depsRes.value.deployments || []);
     }
-    if (appsRes.status === 'fulfilled' || depsRes.status === 'fulfilled') {
+    if (appsRes.status === 'fulfilled' || (depsRes && depsRes.status === 'fulfilled')) {
       updatedEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
     } else {
       updatedEl.textContent = `Refresh failed: ${appsRes.reason ? appsRes.reason.message : 'unknown error'}`;
@@ -375,7 +409,32 @@ $('logClose').addEventListener('click', () => $('logModal').classList.add('hidde
 $('logModal').addEventListener('click', (ev) => {
   if (ev.target === $('logModal')) $('logModal').classList.add('hidden');
 });
+$('historyFilter').addEventListener('change', () => renderHistory());
 
+// ---------- View routing (hash based) ----------
+const ROUTES = ['apps', 'activity', 'add'];
+
+function currentRoute() {
+  const m = String(location.hash || '').match(/^#\/([a-z]+)/);
+  return m && ROUTES.includes(m[1]) ? m[1] : 'apps';
+}
+
+function applyRoute() {
+  const route = currentRoute();
+  for (const r of ROUTES) {
+    const view = $(`view-${r}`);
+    if (view) view.classList.toggle('hidden', r !== route);
+  }
+  document.querySelectorAll('.nav-link').forEach((link) => {
+    link.classList.toggle('active', link.dataset.route === route);
+  });
+  // Entering the Activity view loads the stream right away instead
+  // of waiting for the next poll cycle.
+  if (route === 'activity') refresh();
+}
+
+window.addEventListener('hashchange', applyRoute);
+applyRoute();
 refresh();
 
 // ---------- Environment (.env) editor ----------
@@ -690,14 +749,9 @@ envModal.addEventListener('click', (ev) => {
   if (ev.target === envModal) envModal.classList.add('hidden');
 });
 
-// ---------- Add App ----------
-const addForm = document.getElementById('addForm');
-const addMsg = document.getElementById('addMsg');
-addForm.addEventListener('submit', async (ev) => {
-  ev.preventDefault();
-  const fd = new FormData(addForm);
+// ---------- Add Project (from GitHub / from a local folder) ----------
+function formExtras(fd) {
   const body = {
-    repoUrl: String(fd.get('repoUrl') || '').trim(),
     trigger: String(fd.get('trigger') || 'commit'),
     autoDeploy: fd.get('autoDeploy') === 'on',
   };
@@ -709,19 +763,44 @@ addForm.addEventListener('submit', async (ev) => {
   if (port) body.port = Number(port);
   const workflow = String(fd.get('workflow') || '').trim();
   if (workflow) body.workflow = workflow;
-  addMsg.textContent = 'Cloning…';
+  return body;
+}
+
+// After a successful add, jump back to the Apps view where the new
+// card is already visible.
+async function submitAdd(body, msgEl, form, busyText) {
+  msgEl.textContent = busyText;
   try {
     const data = await api('/api/apps', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    addMsg.textContent = data.warning
+    msgEl.textContent = data.warning
       ? `Added ${data.app.id} with a warning: ${data.warning}`
       : `Added ${data.app.id}.`;
-    if (!data.warning) addForm.reset();
+    form.reset();
+    location.hash = '#/apps';
   } catch (e) {
-    addMsg.textContent = `Failed: ${e.message}`;
+    msgEl.textContent = `Failed: ${e.message}`;
   }
   refresh();
+}
+
+const addForm = document.getElementById('addForm');
+const addMsg = document.getElementById('addMsg');
+addForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(addForm);
+  const body = { ...formExtras(fd), repoUrl: String(fd.get('repoUrl') || '').trim() };
+  submitAdd(body, addMsg, addForm, 'Cloning…');
+});
+
+const localForm = document.getElementById('localForm');
+const localMsg = document.getElementById('localMsg');
+localForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(localForm);
+  const body = { ...formExtras(fd), source: 'local', path: String(fd.get('path') || '').trim() };
+  submitAdd(body, localMsg, localForm, 'Registering…');
 });
