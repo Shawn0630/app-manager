@@ -19,6 +19,9 @@
 //                                      Project (local folder):
 //                                      lists the directories the
 //                                      manager itself can see
+//   POST   /api/apps/scan-port { path }  port detection for the
+//                                      local-folder form (rules +
+//                                      optional AI check)
 // Everything else is the static dashboard in public/.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -38,6 +41,7 @@ import { getProvider } from './providers/index.js';
 import { startPollers, watchApp, unwatchApp } from './poller.js';
 import { registerApp, registerLocalApp, isInsideAppsRoot } from './registry.js';
 import { browseDirectory } from './browse.js';
+import { scanPorts } from './portscan.js';
 import { refreshRuns } from './actionsWatch.js';
 import { hasGitHubRemote } from './github.js';
 import { clearAppState } from './appstate.js';
@@ -164,6 +168,18 @@ app.delete('/api/apps/:id', async (req, res) => {
 app.get('/api/browse', async (req, res) => {
   try {
     return res.json(await browseDirectory(req.query.path));
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: e.message || String(e) });
+  }
+});
+
+// Port detection for the local-folder form: scan a folder (rules
+// first, AI check when an LLM is configured) and return candidate
+// ports to prefill the Port field. Read-only — nothing is
+// registered or written by this endpoint.
+app.post('/api/apps/scan-port', async (req, res) => {
+  try {
+    return res.json(await scanPorts((req.body || {}).path));
   } catch (e) {
     return res.status(e.status || 500).json({ error: e.message || String(e) });
   }

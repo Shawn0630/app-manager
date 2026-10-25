@@ -25,6 +25,14 @@ services:
       # below), so the picker opens at your projects folder instead
       # of the container's filesystem root. "/" when unset.
       BROWSE_ROOT: ${HOST_PROJECTS_DIR:-/}
+      # Optional LLM for the Add Project port scan's AI check (an
+      # OpenAI-compatible chat completions endpoint). All three
+      # come from the root .env (see .env.example); empty when
+      # unset, which disables the AI check — the deterministic
+      # scan still runs. The key is used server-side only.
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
     volumes:
       # The manager drives the HOST Docker daemon through this socket.
       # (This is effectively root access to the host — see README.)

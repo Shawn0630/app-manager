@@ -264,6 +264,24 @@ async function main() {
     await page.screenshot({ path: path.join(WORK, 'dashboard-add.png'), fullPage: true });
     console.log('saved dashboard-add.png (Add Project view)');
 
+    // Port detection on the local form: point it at the fixture
+    // project (compose publishes "8088:80") and run Detect port —
+    // a candidate chip appears and the Port field is prefilled.
+    // No LLM is configured in this fixture, so the candidates area
+    // also shows the "Deterministic scan only" note.
+    await page.evaluate((p) => {
+      document.querySelector('#localForm input[name="path"]').value = p;
+      document.getElementById('detectPortBtn').click();
+    }, workdir);
+    await page.waitForSelector('#portCandidates .port-cand', { timeout: 20_000 });
+    await page.waitForFunction(
+      () => document.querySelector('#localForm input[name="port"]').value === '8088',
+      { timeout: 10_000 },
+    );
+    await sleep(400);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-add-scan.png'), fullPage: true });
+    console.log('saved dashboard-add-scan.png (port detection)');
+
     // Folder browser: prefill the local form's path input with the
     // fixture workdir, open the picker there (it starts at the
     // typed path — which is also the configured Projects root, so

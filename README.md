@@ -144,6 +144,9 @@ Environment variables for the manager itself:
 | `MANAGER_PASSWORD` | _(unset)_ | When set, Basic auth protects **all** routes. |
 | `GITHUB_TOKEN` | _(unset)_ | Token for the GitHub Actions API. Required for private repos; raises the rate limit for public ones. |
 | `GITHUB_API_URL` | `https://api.github.com` | API base override (GitHub Enterprise, or tests). |
+| `LLM_BASE_URL` | _(unset)_ | Base URL of an OpenAI-compatible chat completions endpoint for the port scan's AI check (e.g. `https://api.openai.com/v1`). Under Docker it comes from the root `.env` via the manager's compose file; with plain `npm start` it falls back to the root `.env` when the variable itself is unset. The AI check is enabled when this and `LLM_MODEL` are both set. |
+| `LLM_API_KEY` | _(unset)_ | API key for that endpoint. Optional (local endpoints may not need one). Used server-side only — never returned by any API, logged, or written to disk. |
+| `LLM_MODEL` | _(unset)_ | Model id for the AI check (e.g. `gpt-4o-mini`). |
 
 ## How it works
 
@@ -218,6 +221,19 @@ compose file the same way, and:
   folder**, under the same safety rule as everywhere else:
   `git pull --ff-only` — uncommitted changes are never overwritten,
   and a conflicting pull fails the deployment instead.
+- **Port detection** (`POST /api/apps/scan-port`): picking a
+  folder (or pressing **Detect port**) scans it for the port to
+  prefill — the compose file's published `ports:` mappings (short
+  and long syntax; `${VAR}` / `${VAR:-default}` resolved against
+  the project's own `.env`), Dockerfile `EXPOSE` lines, and
+  `.env` keys whose name contains `PORT`. Compose findings are
+  ground truth and come first. When an LLM is configured (below),
+  an AI check reviews a compact material pack — the compose file,
+  Dockerfile, `package.json`, **only** the PORT-keyed `.env`
+  entries, a README excerpt, and an entry-file excerpt — and can
+  add ports the rules missed (e.g. hard-coded in code), each with
+  its evidence. The result only ever *prefills* the Port field;
+  it is never locked.
 - If the folder is not a git repo, or the repo has no `origin`
   remote, the app registers with `repoUrl: null` and a warning on
   its card: nothing can be watched or pulled, **Update** degrades

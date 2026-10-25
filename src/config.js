@@ -26,6 +26,40 @@ function resolvePort() {
 }
 
 export const PORT = resolvePort();
+
+// Read one KEY=value from the project-root .env (the file docker
+// compose reads for the manager itself), or '' when absent. Values
+// may be quoted. Used for settings compose passes through anyway,
+// so plain `npm start` behaves like the Docker deployment.
+function rootEnvValue(key) {
+  try {
+    const text = fs.readFileSync(path.join(ROOT, '.env'), 'utf8');
+    for (const line of text.split('\n')) {
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (m && m[1] === key) return m[2].replace(/^["']|["']$/g, '');
+    }
+  } catch {
+    // No root .env — nothing to fall back to.
+  }
+  return '';
+}
+
+// Optional LLM for the Add Project port scan's AI check: an
+// OpenAI-compatible chat completions endpoint. Configured only
+// when BOTH a base URL and a model are known (environment first,
+// root .env as fallback, like the port above). The API key is
+// optional — local endpoints may not need one — and stays
+// server-side only: it is never returned by any API, logged, or
+// written to any file.
+function resolveLlm() {
+  const pick = (k) => String(process.env[k] || '').trim() || rootEnvValue(k);
+  const baseUrl = pick('LLM_BASE_URL').replace(/\/+$/, '');
+  const model = pick('LLM_MODEL');
+  if (!baseUrl || !model) return null;
+  return { baseUrl, apiKey: pick('LLM_API_KEY'), model };
+}
+
+export const LLM = resolveLlm();
 export const CONFIG_PATH = process.env.CONFIG_PATH
   ? path.resolve(process.env.CONFIG_PATH)
   : path.join(ROOT, 'config', 'apps.json');

@@ -102,10 +102,17 @@
             <span>Branch</span>
             <input name="branch" type="text" placeholder="Detected from the repo">
           </label>
-          <label class="field small">
+          <div class="field port-field">
             <span>Port</span>
-            <input name="port" type="number" min="1" max="65535" placeholder="8080">
-          </label>
+            <span class="path-row">
+              <input name="port" type="number" min="1" max="65535" placeholder="8080">
+              <button id="detectPortBtn" type="button" class="btn">Detect port</button>
+            </span>
+          </div>
+          <div class="field grow">
+            <span>Detected ports</span>
+            <div id="portCandidates" class="port-candidates"><span class="muted">Pick a folder, then Detect port — the scan reads the compose file, Dockerfile and PORT keys, and prefills the main port.</span></div>
+          </div>
           <label class="field">
             <span>Trigger</span>
             <select name="trigger">

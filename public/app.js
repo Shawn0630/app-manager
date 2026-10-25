@@ -822,6 +822,65 @@ localForm.addEventListener('submit', async (ev) => {
   submitAdd(body, localMsg, localForm, 'Registering…');
 });
 
+// ---------- Port detection for the local-folder form ----------
+// The scan is advisory: it prefills the Port field with the main
+// detected port, but only while the field is empty or still holds
+// the value a previous scan put there — a value the user typed is
+// never overwritten. Candidate chips can be clicked to pick a
+// different detected port.
+const portInput = localForm.querySelector('input[name="port"]');
+const detectPortBtn = $('detectPortBtn');
+const portCandidatesEl = $('portCandidates');
+let portAutoValue = null; // last value the scan itself filled in
+
+function renderPortScan(scan) {
+  const chips = (scan.candidates || []).map((c) =>
+    `<button type="button" class="port-cand" data-port="${esc(c.port)}" title="${esc(c.detail || '')}">${esc(c.port)} <span class="muted">· ${esc(c.source)}</span></button>`);
+  let note = '';
+  if (scan.aiUsed && scan.aiNote) {
+    note = `<div class="muted">AI check: ${esc(scan.aiNote)}</div>`;
+  } else if (!scan.aiConfigured) {
+    note = '<div class="muted">Deterministic scan only — add LLM_API_KEY / LLM_MODEL to the manager\'s .env to enable the AI check.</div>';
+  } else if (scan.aiNote) {
+    note = `<div class="muted">${esc(scan.aiNote)}</div>`;
+  }
+  portCandidatesEl.innerHTML = (chips.length
+    ? chips.join('')
+    : '<span class="muted">No ports detected in this folder.</span>') + note;
+  if (scan.primaryPort && (!portInput.value || portInput.value === String(portAutoValue))) {
+    portInput.value = scan.primaryPort;
+    portAutoValue = scan.primaryPort;
+  }
+}
+
+async function scanLocalPort() {
+  const p = localPathInput.value.trim();
+  if (!p) {
+    portCandidatesEl.innerHTML = '<span class="muted">Enter or pick a folder first.</span>';
+    return;
+  }
+  portCandidatesEl.innerHTML = '<span class="muted">Scanning…</span>';
+  try {
+    const scan = await api('/api/apps/scan-port', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: p }),
+    });
+    renderPortScan(scan);
+  } catch (e) {
+    portCandidatesEl.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+detectPortBtn.addEventListener('click', scanLocalPort);
+portCandidatesEl.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-port]');
+  if (btn) {
+    portInput.value = btn.dataset.port;
+    portAutoValue = null; // an explicit pick is the user's value now
+  }
+});
+
 // ---------- Folder browser (server-side directory picker) ----------
 // A web page cannot open the OS file dialog, so the manager lists
 // its OWN filesystem instead: the picker walks the directories the
@@ -930,4 +989,8 @@ $('browseUse').addEventListener('click', () => {
   }
   browseModal.classList.add('hidden');
   localMsg.textContent = '';
+  scanLocalPort();
+});
+localPathInput.addEventListener('change', () => {
+  if (localPathInput.value.trim().startsWith('/')) scanLocalPort();
 });

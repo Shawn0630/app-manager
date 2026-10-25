@@ -1307,6 +1307,172 @@ async function main() {
     await stopManager(mgr);
   }
 
+  // ---- Phase: port scan for local add (rules + optional AI) ----
+  // Fixture project exercising every rule source: compose short
+  // syntax, compose long syntax, ${VAR:-default} interpolation
+  // resolved through the project's own .env, Dockerfile EXPOSE,
+  // and a PORT-keyed .env entry. Its .env also holds a secret that
+  // must never leak — not into the scan response, and not into
+  // the material pack sent to the LLM.
+  const scanDir = path.join(WORK, 'scanproj');
+  fs.mkdirSync(scanDir, { recursive: true });
+  fs.writeFileSync(path.join(scanDir, 'docker-compose.yml'), [
+    'services:',
+    '  web:',
+    '    image: nginx:alpine',
+    '    ports:',
+    '      - "8088:80"',
+    '      - target: 3000',
+    '        published: 9090',
+    '        protocol: tcp',
+    '  api:',
+    '    image: node:20-alpine',
+    '    ports:',
+    '      - "${PORT:-3000}:3000"',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(scanDir, 'Dockerfile'), 'FROM node:20-alpine\nEXPOSE 5000\nCMD ["node", "server.js"]\n');
+  fs.writeFileSync(path.join(scanDir, '.env'), 'PORT=4000\nAPP_PORT=7000\nAPI_KEY=sk-scan-secret-fixture\n');
+  fs.writeFileSync(path.join(scanDir, 'package.json'), `${JSON.stringify({ name: 'scan-fixture', version: '1.0.0', main: 'server.js' }, null, 1)}\n`);
+  fs.writeFileSync(path.join(scanDir, 'server.js'), "const http = require('http');\nhttp.createServer((q, r) => r.end('ok')).listen(8080);\n");
+  fs.writeFileSync(path.join(scanDir, 'README.md'), '# Scan Fixture\nA tiny test project.\n');
+  const scanCfg = path.join(WORK, 'apps.scan.json');
+  fs.writeFileSync(scanCfg, JSON.stringify({ apps: [] }, null, 1));
+  const postScan = async (p) => {
+    const res = await fetch(`${BASE}/api/apps/scan-port`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: p }),
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* leave null */ }
+    return { status: res.status, json, text };
+  };
+  const byPort = (scan) => Object.fromEntries((scan.candidates || []).map((c) => [c.port, c]));
+
+  // No LLM configured: rules only.
+  mgr = startManager({ configPath: scanCfg, dataDir: path.join(WORK, 'data-scan') });
+  try {
+    await waitHealth();
+    const s = await postScan(scanDir);
+    check('scan: 200 with candidates (no LLM configured)',
+      s.status === 200 && s.json && Array.isArray(s.json.candidates), s.status);
+    const bp = byPort(s.json);
+    check('scan: compose short syntax found (8088)',
+      Boolean(bp[8088]) && bp[8088].source === 'compose', bp[8088]);
+    check('scan: compose long syntax found (9090 via published:)',
+      Boolean(bp[9090]) && bp[9090].source === 'compose', bp[9090]);
+    check('scan: ${PORT:-3000} resolved through the project .env to 4000 (compose)',
+      Boolean(bp[4000]) && bp[4000].source === 'compose' && /PORT/.test(bp[4000].detail || ''), bp[4000]);
+    check('scan: Dockerfile EXPOSE found (5000)',
+      Boolean(bp[5000]) && bp[5000].source === 'dockerfile', bp[5000]);
+    check('scan: PORT-keyed .env entry found (7000, env:APP_PORT)',
+      Boolean(bp[7000]) && bp[7000].source === 'env:APP_PORT', bp[7000]);
+    check('scan: compose is ground truth — primaryPort is the first compose port',
+      s.json.primaryPort === 8088, s.json.primaryPort);
+    check('scan: no LLM -> aiUsed=false, aiConfigured=false',
+      s.json.aiUsed === false && s.json.aiConfigured === false,
+      { aiUsed: s.json.aiUsed, aiConfigured: s.json.aiConfigured });
+    check('scan: the fixture secret never appears in the response',
+      !s.text.includes('sk-scan-secret-fixture'));
+    const badTilde = await postScan('~/some/project');
+    check('scan: "~" path -> 400 "not expanded"',
+      badTilde.status === 400 && /not expanded/.test(badTilde.json.error || ''), badTilde.json);
+    const badMissing = await postScan(path.join(WORK, 'no-such-scan-dir'));
+    check('scan: missing folder -> 400 "not found"',
+      badMissing.status === 400 && /not found/.test(badMissing.json.error || ''), badMissing.json);
+  } finally {
+    await stopManager(mgr);
+  }
+
+  // LLM configured (OpenAI-compatible stub): the AI adds a port
+  // that only exists in code; the request pack must carry the
+  // PORT-keyed env entries and NONE of the other env values.
+  const llmState = { mode: 'ok', bodies: [] };
+  const llmServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      llmState.bodies.push({ url: req.url, headers: req.headers, body });
+      if (llmState.mode === 'fail') {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end('{"error":"stub failure"}');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              ports: [
+                { port: 8080, evidence: 'server.js calls .listen(8080)' },
+                { port: 8088, evidence: 'compose publishes 8088' },
+              ],
+              summary: 'Main service listens on 8080 per server.js; compose publishes 8088.',
+            }),
+          },
+        }],
+      }));
+    });
+  });
+  await new Promise((resolve) => llmServer.listen(0, '127.0.0.1', resolve));
+  const llmData = path.join(WORK, 'data-scan-llm');
+  mgr = startManager({
+    configPath: scanCfg,
+    dataDir: llmData,
+    extraEnv: {
+      LLM_BASE_URL: `http://127.0.0.1:${llmServer.address().port}`,
+      LLM_API_KEY: 'test-llm-key-xyz',
+      LLM_MODEL: 'stub-model',
+    },
+  });
+  try {
+    await waitHealth();
+    const s = await postScan(scanDir);
+    check('scan+AI: aiUsed=true, aiConfigured=true',
+      s.status === 200 && s.json.aiUsed === true && s.json.aiConfigured === true,
+      { aiUsed: s.json && s.json.aiUsed, aiConfigured: s.json && s.json.aiConfigured });
+    const bp = byPort(s.json);
+    check('scan+AI: AI-only port merged with source "ai" (8080)',
+      Boolean(bp[8080]) && bp[8080].source === 'ai' && /listen\(8080\)/.test(bp[8080].detail || ''), bp[8080]);
+    check('scan+AI: a port the rules already found keeps the compose source (8088)',
+      Boolean(bp[8088]) && bp[8088].source === 'compose', bp[8088]);
+    check('scan+AI: aiNote carries the AI summary',
+      /listens on 8080/.test(s.json.aiNote || ''), s.json.aiNote);
+    check('scan+AI: primaryPort still the compose ground truth',
+      s.json.primaryPort === 8088, s.json.primaryPort);
+    const sent = llmState.bodies[llmState.bodies.length - 1] || { headers: {}, body: '' };
+    check('scan+AI: stub got a chat completions call with the configured key + model',
+      sent.url.endsWith('/chat/completions')
+        && sent.headers.authorization === 'Bearer test-llm-key-xyz'
+        && sent.body.includes('stub-model'),
+      { url: sent.url, auth: sent.headers.authorization });
+    check('scan+AI: material pack includes the PORT-keyed env entries',
+      sent.body.includes('PORT=4000'), sent.body.slice(0, 200));
+    check('scan+AI: material pack excludes every non-PORT env value (no secret, no API_KEY)',
+      !sent.body.includes('sk-scan-secret-fixture') && !sent.body.includes('API_KEY'));
+    check('scan+AI: the LLM key never appears in the scan response',
+      !s.text.includes('test-llm-key-xyz'));
+    const journalPath = path.join(llmData, 'deployments.jsonl');
+    check('scan+AI: the LLM key never lands in deployments.jsonl',
+      !fs.existsSync(journalPath) || !fs.readFileSync(journalPath, 'utf8').includes('test-llm-key-xyz'));
+
+    llmState.mode = 'fail';
+    const s2 = await postScan(scanDir);
+    check('scan+AI failure: falls back to the rule results with a failure note',
+      s2.status === 200 && s2.json.aiUsed === false
+        && /AI check failed/.test(s2.json.aiNote || '') && /500/.test(s2.json.aiNote || ''),
+      { aiUsed: s2.json && s2.json.aiUsed, aiNote: s2.json && s2.json.aiNote });
+    const bp2 = byPort(s2.json);
+    check('scan+AI failure: rule candidates are still complete',
+      Boolean(bp2[8088]) && Boolean(bp2[9090]) && Boolean(bp2[4000]) && Boolean(bp2[5000]),
+      Object.keys(bp2));
+  } finally {
+    await stopManager(mgr);
+    llmServer.close();
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
