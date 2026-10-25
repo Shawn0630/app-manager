@@ -131,6 +131,11 @@ async function main() {
   ].join('\n'));
   fs.writeFileSync(path.join(workdir3, 'server/.env'), '# visualizer settings\nVIZ_API_KEY=sk-viz-fixture-987\nDEBUG=false\n');
   fs.writeFileSync(path.join(workdir3, 'config/app.env'), 'APP_ONLY=1\n');
+  // Its entry point loads server/.env itself and references one
+  // present and one missing variable — material for the env
+  // panel's AI analyze shot.
+  fs.writeFileSync(path.join(workdir3, 'package.json'), JSON.stringify({ name: 'viz-app', main: 'index.js' }));
+  fs.writeFileSync(path.join(workdir3, 'index.js'), "require('dotenv').config({ path: 'server/.env' });\nconst key = process.env.VIZ_API_KEY;\nconst missing = process.env.MISSING_KEY;\n");
   fs.mkdirSync(path.join(workdir, 'src'), { recursive: true });
   fs.writeFileSync(path.join(workdir, '.env'), '# demo app settings\nAPP_NAME=demo\nAPI_KEY=sk-demo-123456\nDEBUG=false\n');
   const { stdout: headOut } = await gitC(workdir, ['rev-parse', 'HEAD']);
@@ -157,6 +162,29 @@ async function main() {
   });
   await new Promise((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
   const ghApi = `http://127.0.0.1:${mockServer.address().port}`;
+
+  // Stub LLM for the AI shots: answers port-scan prompts and
+  // project-analysis prompts with canned JSON.
+  const llmMock = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const payload = body.includes('suggestedEnvFile')
+        ? {
+          envFiles: [{ path: 'server/.env', evidence: "index.js calls dotenv.config({ path: 'server/.env' })" }],
+          requiredVars: [
+            { key: 'VIZ_API_KEY', evidence: 'process.env.VIZ_API_KEY in index.js' },
+            { key: 'MISSING_KEY', evidence: 'process.env.MISSING_KEY in index.js' },
+          ],
+          suggestedEnvFile: 'server/.env',
+          notes: 'Loads server/.env via dotenv; MISSING_KEY is referenced in code but not defined in it.',
+        }
+        : { ports: [], summary: 'No additional ports found in code or docs.' };
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
+    });
+  });
+  await new Promise((resolve) => llmMock.listen(0, '127.0.0.1', resolve));
 
   const cfg = path.join(WORK, 'apps.json');
   fs.writeFileSync(cfg, JSON.stringify({
@@ -185,6 +213,9 @@ async function main() {
       FAKE_DOCKER_STATE: path.join(WORK, 'fake-state.json'),
       FAKE_DOCKER_CALLS: path.join(WORK, 'fake-calls.log'),
       GITHUB_API_URL: ghApi,
+      LLM_BASE_URL: `http://127.0.0.1:${llmMock.address().port}`,
+      LLM_API_KEY: 'shot-key',
+      LLM_MODEL: 'shot-model',
       // The folder picker opens at the configured Projects root
       // (the fixture workdir) and shows both quick-jump chips.
       BROWSE_ROOT: workdir,
@@ -327,6 +358,16 @@ async function main() {
     await sleep(600);
     await page.screenshot({ path: path.join(WORK, 'dashboard-env-multifile.png') });
     console.log('saved dashboard-env-multifile.png');
+
+    // Run the panel's AI analyze for the same app: the result
+    // shows the suggested env file with a confirm button, the
+    // detected files with their sources, and the required
+    // variables with present/missing state.
+    await page.evaluate(() => document.getElementById('envAnalyzeBtn').click());
+    await page.waitForSelector('#envAnalyzeResult button[data-an-confirm]', { timeout: 20_000 });
+    await sleep(400);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-env-analyze.png') });
+    console.log('saved dashboard-env-analyze.png');
     await page.evaluate(() => document.getElementById('envClose').click());
 
     // Activity view: the tag-based stream on its own page.
@@ -388,6 +429,7 @@ async function main() {
     if (browser) await browser.close();
     mgr.kill('SIGTERM');
     mockServer.close();
+    llmMock.close();
   }
 }
 

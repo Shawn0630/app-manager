@@ -22,6 +22,10 @@
 //   POST   /api/apps/scan-port { path }  port detection for the
 //                                      local-folder form (rules +
 //                                      optional AI check)
+//   POST   /api/apps/analyze { path }    project analysis (env
+//   GET    /api/apps/:id/analyze         files + required vars;
+//                                      rules + optional AI check)
+//   POST   /api/apps/:id/env-file        confirm the app's envFile
 // Everything else is the static dashboard in public/.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -40,9 +44,10 @@ import { readEnvFile, saveEnvFile, normalizeEnvRel } from './envfile.js';
 import { detectEnvFiles } from './envdetect.js';
 import { getProvider } from './providers/index.js';
 import { startPollers, watchApp, unwatchApp } from './poller.js';
-import { registerApp, registerLocalApp, isInsideAppsRoot } from './registry.js';
+import { registerApp, registerLocalApp, isInsideAppsRoot, detectComposeFile } from './registry.js';
 import { browseDirectory } from './browse.js';
-import { scanPorts } from './portscan.js';
+import { scanPorts, validateScanPath } from './portscan.js';
+import { analyzeProject } from './analyze.js';
 import { refreshRuns } from './actionsWatch.js';
 import { hasGitHubRemote } from './github.js';
 import { clearAppState } from './appstate.js';
@@ -184,6 +189,64 @@ app.post('/api/apps/scan-port', async (req, res) => {
   } catch (e) {
     return res.status(e.status || 500).json({ error: e.message || String(e) });
   }
+});
+
+// Project analysis for a not-yet-registered folder (the local
+// form's Analyze button): which env files the project uses and
+// which variables its code requires — rules + the same optional
+// AI layer as the port scan. Read-only; materials sent to the
+// LLM contain env KEY NAMES only, never values.
+app.post('/api/apps/analyze', async (req, res) => {
+  try {
+    const workdir = validateScanPath((req.body || {}).path);
+    const composeFile = detectComposeFile(workdir) || 'docker-compose.yml';
+    return res.json(await analyzeProject(workdir, composeFile));
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: e.message || String(e) });
+  }
+});
+
+// The same analysis for a registered app (the Environment
+// panel's AI analyze entry). Read-only.
+app.get('/api/apps/:id/analyze', async (req, res) => {
+  const a = byId.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'app not found' });
+  try {
+    return res.json(await analyzeProject(a.workdir, a.composeFile));
+  } catch (e) {
+    return res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+// Confirm an env-file choice (e.g. an analysis suggestion): set
+// the app's registered envFile. The ONLY route that writes it —
+// analysis results themselves never change the registry. The
+// path must stay inside the workdir; the file need not exist.
+app.post('/api/apps/:id/env-file', async (req, res) => {
+  const a = byId.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'app not found' });
+  const wanted = req.body && typeof req.body.envFile === 'string' ? req.body.envFile : null;
+  if (!wanted) return res.status(400).json({ error: 'body must be { "envFile": "..." }' });
+  let rel;
+  try {
+    rel = normalizeEnvRel(a, wanted);
+  } catch (e) {
+    return res.status(400).json({ error: e.message || String(e) });
+  }
+  if (appState(a.id).busy) {
+    return res.status(409).json({ error: `app ${a.id} is busy, try again later` });
+  }
+  const before = a.envFile || '.env';
+  a.envFile = rel;
+  saveApps(apps);
+  await appendActionRecord({
+    appId: a.id,
+    action: 'env-file',
+    result: 'success',
+    durationMs: 0,
+    output: `envFile: ${before} -> ${rel}`,
+  });
+  return res.json({ ok: true, envFile: rel });
 });
 
 app.get('/api/deployments', (req, res) => {

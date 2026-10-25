@@ -1671,6 +1671,141 @@ async function main() {
     await stopManager(mgr); mgr = null;
   }
 
+  // ---------- Phase: AI project analysis ----------
+  {
+    const post = async (p, body) => {
+      const res = await fetch(BASE + p, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, json: await res.json().catch(() => ({})), text: '' };
+    };
+    // Fixture the compose rules cannot solve: the compose file
+    // declares NO env_file; the entry point loads server/.env
+    // itself via dotenv, and references two variables — one
+    // present in server/.env, one missing. The env VALUE is a
+    // secret that must never reach the LLM.
+    const aiDir = path.join(WORK, 'aiproj');
+    fs.mkdirSync(path.join(aiDir, 'server'), { recursive: true });
+    fs.writeFileSync(path.join(aiDir, 'docker-compose.yml'), 'services:\n  web:\n    image: alpine\n    ports:\n      - "8080:80"\n');
+    fs.writeFileSync(path.join(aiDir, 'index.js'), [
+      "require('dotenv').config({ path: 'server/.env' });",
+      'const present = process.env.PRESENT_KEY;',
+      'const missing = process.env.MISSING_KEY;',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(aiDir, 'package.json'), JSON.stringify({ name: 'aiproj', main: 'index.js' }));
+    fs.writeFileSync(path.join(aiDir, 'server/.env'), 'PRESENT_KEY=super-secret-value-123\n');
+
+    const aiCfg = path.join(WORK, 'apps.analyze.json');
+    fs.writeFileSync(aiCfg, JSON.stringify({ apps: [] }, null, 1));
+    const aiData = path.join(WORK, 'data-ai');
+    mgr = startManager({ configPath: aiCfg, dataDir: aiData });
+    await waitHealth();
+
+    const a1 = await post('/api/apps/analyze', { path: aiDir });
+    check('analyze (no LLM): 200, explicitly not configured, no error',
+      a1.status === 200 && a1.json.aiUsed === false && a1.json.aiConfigured === false
+        && /not configured/.test(a1.json.aiNote || ''),
+      a1.json && { aiUsed: a1.json.aiUsed, aiNote: a1.json.aiNote });
+    check('analyze (no LLM): the dotenv path in code is found by the rules (source code)',
+      (a1.json.envFiles || []).some((f) => f.path === 'server/.env' && f.source === 'code')
+        && a1.json.suggestedEnvFile === 'server/.env',
+      a1.json.envFiles);
+    check('analyze (no LLM): required vars from grep with server-computed presence',
+      (a1.json.requiredVars || []).some((v) => v.key === 'PRESENT_KEY' && v.presentInEnvFile === true)
+        && (a1.json.requiredVars || []).some((v) => v.key === 'MISSING_KEY' && v.presentInEnvFile === false),
+      a1.json.requiredVars);
+    const aBad = await post('/api/apps/analyze', { path: '~/nope' });
+    check('analyze: ~ path rejected (400)', aBad.status === 400, `got ${aBad.status}`);
+
+    const reg = await post('/api/apps', { source: 'local', path: aiDir });
+    const aiId = reg.json.app && reg.json.app.id;
+    check('analyze: registration alone does NOT adopt the dotenv file (envFile stays .env)',
+      reg.status === 201 && reg.json.app.envFile === '.env',
+      reg.json.app && reg.json.app.envFile);
+    const esc = await post(`/api/apps/${aiId}/env-file`, { envFile: '../evil.env' });
+    check('analyze: env-file confirm rejects an escaping path (400)',
+      esc.status === 400, `got ${esc.status}`);
+    const conf = await post(`/api/apps/${aiId}/env-file`, { envFile: 'server/.env' });
+    const after = await getById(aiId);
+    const cfgDisk = JSON.parse(fs.readFileSync(aiCfg, 'utf8'));
+    check('analyze: after confirm, envFile is server/.env in status AND on disk',
+      conf.status === 200 && conf.json.envFile === 'server/.env'
+        && Boolean(after) && after.envFile === 'server/.env'
+        && cfgDisk.apps.some((x) => x.id === aiId && x.envFile === 'server/.env'),
+      conf.json);
+    await stopManager(mgr); mgr = null;
+
+    // Same fixture, now with a stub LLM that answers analysis
+    // prompts from the materials it is given.
+    const llmBodies = [];
+    const llmAuths = [];
+    const llmServer = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        llmBodies.push(body);
+        llmAuths.push(req.headers.authorization || '');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        const isAnalysis = body.includes('suggestedEnvFile');
+        res.end(JSON.stringify({
+          choices: [{
+            message: {
+              content: isAnalysis
+                ? JSON.stringify({
+                  envFiles: [{ path: 'server/.env', evidence: "index.js calls dotenv.config({ path: 'server/.env' })" }],
+                  requiredVars: [
+                    { key: 'PRESENT_KEY', evidence: 'process.env.PRESENT_KEY in index.js' },
+                    { key: 'MISSING_KEY', evidence: 'process.env.MISSING_KEY in index.js' },
+                  ],
+                  suggestedEnvFile: 'server/.env',
+                  notes: 'Loads server/.env via dotenv; MISSING_KEY is not defined in it.',
+                })
+                : JSON.stringify({ ports: [], summary: 'stub' }),
+            },
+          }],
+        }));
+      });
+    });
+    await new Promise((resolve) => llmServer.listen(0, '127.0.0.1', resolve));
+    mgr = startManager({
+      configPath: aiCfg,
+      dataDir: aiData,
+      extraEnv: {
+        LLM_BASE_URL: `http://127.0.0.1:${llmServer.address().port}`,
+        LLM_API_KEY: 'analyze-key-123',
+        LLM_MODEL: 'stub-model',
+      },
+    });
+    await waitHealth();
+    const a2 = await post('/api/apps/analyze', { path: aiDir });
+    check('analyze+AI: aiUsed, suggestion and notes from the AI layer',
+      a2.status === 200 && a2.json.aiUsed === true && a2.json.aiConfigured === true
+        && a2.json.suggestedEnvFile === 'server/.env'
+        && /dotenv/.test(a2.json.notes || ''),
+      a2.json && { aiUsed: a2.json.aiUsed, notes: a2.json.notes });
+    check('analyze+AI: required vars carry server-computed presence (AI claims are not trusted)',
+      (a2.json.requiredVars || []).some((v) => v.key === 'MISSING_KEY' && v.presentInEnvFile === false)
+        && (a2.json.requiredVars || []).some((v) => v.key === 'PRESENT_KEY' && v.presentInEnvFile === true),
+      a2.json.requiredVars);
+    const sent = llmBodies.join('\n');
+    check('analyze+AI: materials contain env KEY NAMES but never env VALUES',
+      sent.includes('PRESENT_KEY') && !sent.includes('super-secret-value-123'),
+      { hasKey: sent.includes('PRESENT_KEY'), hasSecret: sent.includes('super-secret-value-123') });
+    check('analyze+AI: the LLM key went in the header and appears nowhere in the response',
+      llmAuths.some((h) => h === 'Bearer analyze-key-123')
+        && !JSON.stringify(a2.json).includes('analyze-key-123'),
+      llmAuths[0]);
+    const a3 = await api('GET', `/api/apps/${aiId}/analyze`);
+    check('analyze+AI: per-app analyze endpoint works for a registered app',
+      a3.status === 200 && a3.json.aiUsed === true && a3.json.suggestedEnvFile === 'server/.env',
+      a3.json && a3.json.suggestedEnvFile);
+    llmServer.close();
+    await stopManager(mgr); mgr = null;
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

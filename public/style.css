@@ -243,6 +243,23 @@ main { padding: 20px 22px 40px; max-width: 1220px; margin: 0 auto; }
   white-space: nowrap;
 }
 .port-cand:hover { background: #d3e2ff; }
+
+/* Project analysis results (Add Project form + env panel):
+   suggested env file, the detected files, and the required
+   variables with their present/missing state. */
+.analyze-result { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; margin-top: 6px; }
+.analyze-result .muted, .analyze-result .err { font-size: 12.5px; }
+.an-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.an-ok { color: var(--green); font-weight: 600; }
+.an-src {
+  font-size: 11px; font-weight: 700; color: var(--blue-dark);
+  background: #e4edff; border-radius: 999px; padding: 0 7px;
+}
+.an-vars { display: flex; flex-wrap: wrap; gap: 5px; }
+.an-var { border-radius: 999px; padding: 1px 9px; font-weight: 600; border: 1px solid var(--border); white-space: nowrap; }
+.an-var.ok { background: #e5f6ec; color: #146c2e; border-color: #bfe6cc; }
+.an-var.miss { background: var(--amber-bg); color: #7c4a03; border-color: #f0d9ae; }
+.env-analyze-bar { display: flex; gap: 10px; align-items: center; margin: 2px 0 4px; }
 .port-cand .muted { font-weight: 400; }
 
 /* ---------- app cards ---------- */

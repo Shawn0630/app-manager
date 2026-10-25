@@ -152,7 +152,7 @@ Environment variables for the manager itself:
 | `MANAGER_PASSWORD` | _(unset)_ | When set, Basic auth protects **all** routes. |
 | `GITHUB_TOKEN` | _(unset)_ | Token for the GitHub Actions API. Required for private repos; raises the rate limit for public ones. |
 | `GITHUB_API_URL` | `https://api.github.com` | API base override (GitHub Enterprise, or tests). |
-| `LLM_BASE_URL` | _(unset)_ | Base URL of an OpenAI-compatible chat completions endpoint for the port scan's AI check (e.g. `https://api.openai.com/v1`). Under Docker it comes from the root `.env` via the manager's compose file; with plain `npm start` it falls back to the root `.env` when the variable itself is unset. The AI check is enabled when this and `LLM_MODEL` are both set. |
+| `LLM_BASE_URL` | _(unset)_ | Base URL of an OpenAI-compatible chat completions endpoint for the AI checks — port scan and project analysis (e.g. `https://api.openai.com/v1`). Under Docker it comes from the root `.env` via the manager's compose file; with plain `npm start` it falls back to the root `.env` when the variable itself is unset. The AI check is enabled when this and `LLM_MODEL` are both set. |
 | `LLM_API_KEY` | _(unset)_ | API key for that endpoint. Optional (local endpoints may not need one). Used server-side only — never returned by any API, logged, or written to disk. |
 | `LLM_MODEL` | _(unset)_ | Model id for the AI check (e.g. `gpt-4o-mini`). |
 
@@ -242,6 +242,27 @@ compose file the same way, and:
   add ports the rules missed (e.g. hard-coded in code), each with
   its evidence. The result only ever *prefills* the Port field;
   it is never locked.
+- **Project analysis** (`POST /api/apps/analyze` for a folder,
+  `GET /api/apps/:id/analyze` for a registered app): the form's
+  **Analyze project** button — and the Environment panel's
+  **AI analyze** button — work out which env file the project
+  really uses and which variables its code requires. Rules first:
+  the compose `env_file` declarations plus a grep of the code
+  for env references (`process.env.X`, `os.environ`, `getenv`, …)
+  and dotenv config paths — the grep catches projects whose
+  compose file declares no `env_file` but whose entry point
+  loads e.g. `server/.env` itself. When an LLM is configured,
+  the AI check (same configuration and endpoint as the port
+  scan) reviews the file listing, compose/Dockerfile/
+  `package.json`, the grep hits, README excerpts, and env
+  **key names only — never values**, and can add framework
+  conventions (e.g. `.env.local`) and a primary-file suggestion.
+  Presence of each required variable is computed on the server
+  against the real files. Results are suggestions: in the form,
+  accepting one makes it the registration's `envFile`; in the
+  panel, confirming one calls `POST /api/apps/:id/env-file`.
+  Missing variables are only ever flagged, never invented or
+  written.
 - If the folder is not a git repo, or the repo has no `origin`
   remote, the app registers with `repoUrl: null` and a warning on
   its card: nothing can be watched or pulled, **Update** degrades

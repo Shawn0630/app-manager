@@ -113,6 +113,14 @@
             <span>Detected ports</span>
             <div id="portCandidates" class="port-candidates"><span class="muted">Pick a folder, then Detect port — the scan reads the compose file, Dockerfile and PORT keys, and prefills the main port.</span></div>
           </div>
+          <div class="field grow">
+            <span>Project analysis</span>
+            <div>
+              <button id="analyzeBtn" type="button" class="btn">Analyze project</button>
+              <span class="note">Finds the env file the project really uses and the variables its code needs.</span>
+            </div>
+            <div id="analyzeResult" class="analyze-result hidden"></div>
+          </div>
           <label class="field">
             <span>Trigger</span>
             <select name="trigger">
@@ -177,6 +185,11 @@
           </label>
           <span id="envFileNote" class="note"></span>
         </div>
+        <div class="env-analyze-bar">
+          <button id="envAnalyzeBtn" type="button" class="btn btn-small">AI analyze</button>
+          <span class="note">Re-check which env file this project uses and which variables its code needs.</span>
+        </div>
+        <div id="envAnalyzeResult" class="analyze-result hidden"></div>
         <div class="env-toolbar">
           <div class="seg">
             <button id="envModeTable" type="button">Table</button>

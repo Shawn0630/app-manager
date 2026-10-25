@@ -28,6 +28,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { LLM } from './config.js';
+import { chatJson } from './llm.js';
 import { detectComposeFile } from './registry.js';
 import { parseEnvText } from './envfile.js';
 
@@ -43,7 +44,7 @@ function badRequest(message) {
 // Same path rules as local registration (registry.js): absolute
 // path, "~" rejected with an explanation, must exist as a folder
 // from the manager's point of view.
-function validateScanPath(rawInput) {
+export function validateScanPath(rawInput) {
   const raw = String(rawInput || '').trim();
   if (!raw) throw badRequest('path is required');
   if (raw.startsWith('~')) {
@@ -327,34 +328,16 @@ async function aiCheck(materials, ruleCandidates) {
         + materials,
     },
   ];
-  let res;
-  try {
-    res = await fetch(`${LLM.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(LLM.apiKey ? { Authorization: `Bearer ${LLM.apiKey}` } : {}),
-      },
-      body: JSON.stringify({ model: LLM.model, temperature: 0, messages }),
-      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
-    });
-  } catch (e) {
-    throw new Error(e && e.name === 'TimeoutError' ? `timed out after ${AI_TIMEOUT_MS / 1000}s` : 'request failed');
-  }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json().catch(() => null);
-  const content = data && data.choices && data.choices[0] && data.choices[0].message
-    ? data.choices[0].message.content
-    : null;
-  if (!content) throw new Error('empty response');
-  const open = content.indexOf('{');
-  const close = content.lastIndexOf('}');
-  if (open < 0 || close <= open) throw new Error('response was not JSON');
+  // Transport shared with the project analysis (llm.js); the
+  // error wording this module has always produced is preserved.
   let parsed;
   try {
-    parsed = JSON.parse(content.slice(open, close + 1));
-  } catch {
-    throw new Error('response was not JSON');
+    parsed = await chatJson(LLM, messages, { timeoutMs: AI_TIMEOUT_MS });
+  } catch (e) {
+    if (e.message === 'request timed out') throw new Error(`timed out after ${AI_TIMEOUT_MS / 1000}s`);
+    if (e.message.startsWith('request failed')) throw new Error('request failed');
+    if (e.message === 'unexpected response shape') throw new Error('empty response');
+    throw e;
   }
   const ports = (Array.isArray(parsed.ports) ? parsed.ports : [])
     .map((p) => ({

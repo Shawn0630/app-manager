@@ -512,6 +512,8 @@ const envStaticTitle = document.getElementById('envStaticTitle');
 const envFileBar = document.getElementById('envFileBar');
 const envFileSelect = document.getElementById('envFileSelect');
 const envFileNote = document.getElementById('envFileNote');
+const envAnalyzeBtn = document.getElementById('envAnalyzeBtn');
+const envAnalyzeResultEl = document.getElementById('envAnalyzeResult');
 const envNote = document.getElementById('envNote');
 const envMsg = document.getElementById('envMsg');
 const envRows = document.getElementById('envRows');
@@ -698,6 +700,8 @@ async function openEnv(id, file) {
   envTitle.textContent = `Environment — ${id}`;
   envFileBar.classList.add('hidden');
   envFileNote.textContent = '';
+  envAnalyzeResultEl.classList.add('hidden');
+  envAnalyzeResultEl.innerHTML = '';
   envModal.classList.remove('hidden');
   const enc = encodeURIComponent(id);
   // The three layers load independently: one failing must not
@@ -837,6 +841,53 @@ envModeRawBtn.addEventListener('click', () => setEnvMode('raw'));
 envFileSelect.addEventListener('change', () => {
   if (envCtx) openEnv(envCtx.id, envFileSelect.value);
 });
+
+// AI analyze in the env panel: re-run the project analysis for
+// this app and present the suggestion. Confirming is the only
+// way it changes the registered envFile (POST /env-file), after
+// which the panel reloads on the new basis.
+function renderPanelAnalysis(data) {
+  const sug = data.suggestedEnvFile;
+  let action = '';
+  if (sug && sug !== envCtx.envFile) {
+    action = `<button type="button" class="btn btn-small" data-an-confirm="${esc(sug)}">Set envFile to ${esc(sug)}</button>`;
+  } else if (sug) {
+    action = '<span class="an-ok">✓ already the app\'s env file</span>';
+  }
+  envAnalyzeResultEl.innerHTML = analysisHtml(data, action);
+  envAnalyzeResultEl.classList.remove('hidden');
+}
+
+envAnalyzeBtn.addEventListener('click', async () => {
+  if (!envCtx) return;
+  envAnalyzeResultEl.innerHTML = '<span class="muted">Analyzing…</span>';
+  envAnalyzeResultEl.classList.remove('hidden');
+  try {
+    renderPanelAnalysis(await api(`/api/apps/${encodeURIComponent(envCtx.id)}/analyze`));
+  } catch (e) {
+    envAnalyzeResultEl.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+});
+
+envAnalyzeResultEl.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-an-confirm]');
+  if (!btn || !envCtx) return;
+  const target = btn.dataset.anConfirm;
+  btn.disabled = true;
+  try {
+    await api(`/api/apps/${encodeURIComponent(envCtx.id)}/env-file`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ envFile: target }),
+    });
+    envMsg.textContent = `envFile set to ${target}.`;
+    openEnv(envCtx.id);
+    refresh();
+  } catch (e) {
+    envAnalyzeResultEl.innerHTML += `<div class="err">${esc(e.message)}</div>`;
+    btn.disabled = false;
+  }
+});
 document.getElementById('envSave').addEventListener('click', () => saveEnv(false));
 document.getElementById('envSaveRedeploy').addEventListener('click', () => saveEnv(true));
 document.getElementById('envClose').addEventListener('click', () => envModal.classList.add('hidden'));
@@ -897,6 +948,10 @@ localForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const fd = new FormData(localForm);
   const body = { ...formExtras(fd), source: 'local', path: String(fd.get('path') || '').trim() };
+  // An accepted analysis suggestion becomes the registration's
+  // envFile; without an explicit accept, nothing is sent and the
+  // compose-detection/default rules apply.
+  if (acceptedEnvFile) body.envFile = acceptedEnvFile;
   submitAdd(body, localMsg, localForm, 'Registering…');
 });
 
@@ -956,6 +1011,80 @@ portCandidatesEl.addEventListener('click', (ev) => {
   if (btn) {
     portInput.value = btn.dataset.port;
     portAutoValue = null; // an explicit pick is the user's value now
+  }
+});
+
+// ---------- Project analysis (shared by the form + env panel) ----------
+// Rules + the optional AI check answer: which env file does this
+// project really use, and which variables does its code require?
+// Always a SUGGESTION — in the form it only reaches the
+// registration when the user accepts it; in the env panel it
+// only changes the app when the user confirms it there.
+function analysisHtml(data, actionHtml) {
+  const files = (data.envFiles || []).map((f) => `<div class="an-file"><b>${esc(f.path)}</b> <span class="an-src">${esc(f.source)}</span> <span class="muted">${esc(f.evidence || '')}</span>${f.exists ? '' : ' <span class="muted">(missing)</span>'}</div>`).join('');
+  const vars = (data.requiredVars || []).map((v) => `<span class="an-var ${v.presentInEnvFile ? 'ok' : 'miss'}" title="${esc(v.evidence || '')}">${esc(v.key)} ${v.presentInEnvFile ? '✓ present' : '✗ missing'}</span>`).join('');
+  const notes = [];
+  if (data.notes) notes.push(`<div class="muted">${esc(data.notes)}</div>`);
+  if (!data.aiConfigured) {
+    notes.push('<div class="muted">Deterministic analysis only — add LLM_API_KEY / LLM_MODEL to the manager\'s .env to enable the AI check.</div>');
+  } else if (data.aiNote) {
+    notes.push(`<div class="muted">${esc(data.aiNote)}</div>`);
+  }
+  return `<div class="an-line"><b>Suggested env file:</b> ${data.suggestedEnvFile ? esc(data.suggestedEnvFile) : '<span class="muted">none found</span>'} ${actionHtml || ''}</div>`
+    + (files || '<div class="muted">No env files detected.</div>')
+    + (vars ? `<div class="an-vars">${vars}</div>` : '<div class="muted">No env variables referenced in code.</div>')
+    + notes.join('');
+}
+
+// ---------- Project analysis in the local-folder form ----------
+const analyzeBtn = $('analyzeBtn');
+const analyzeResultEl = $('analyzeResult');
+let acceptedEnvFile = null; // suggestion the user accepted for THIS registration
+let lastAnalysis = null;
+
+function renderFormAnalysis(data) {
+  lastAnalysis = data;
+  const sug = data.suggestedEnvFile;
+  const action = !sug
+    ? ''
+    : acceptedEnvFile === sug
+      ? `<span class="an-ok">✓ will register with envFile: ${esc(sug)}</span> <button type="button" class="btn btn-small" data-an-undo="1">Undo</button>`
+      : `<button type="button" class="btn btn-small" data-an-use="${esc(sug)}">Use this env file</button>`;
+  analyzeResultEl.innerHTML = analysisHtml(data, action);
+  analyzeResultEl.classList.remove('hidden');
+}
+
+analyzeResultEl.addEventListener('click', (ev) => {
+  const use = ev.target.closest('button[data-an-use]');
+  const undo = ev.target.closest('button[data-an-undo]');
+  if (use) {
+    acceptedEnvFile = use.dataset.anUse;
+    renderFormAnalysis(lastAnalysis);
+  } else if (undo) {
+    acceptedEnvFile = null;
+    renderFormAnalysis(lastAnalysis);
+  }
+});
+
+analyzeBtn.addEventListener('click', async () => {
+  const p = localPathInput.value.trim();
+  if (!p) {
+    analyzeResultEl.innerHTML = '<span class="muted">Enter or pick a folder first.</span>';
+    analyzeResultEl.classList.remove('hidden');
+    return;
+  }
+  analyzeResultEl.innerHTML = '<span class="muted">Analyzing…</span>';
+  analyzeResultEl.classList.remove('hidden');
+  try {
+    const data = await api('/api/apps/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: p }),
+    });
+    acceptedEnvFile = null;
+    renderFormAnalysis(data);
+  } catch (e) {
+    analyzeResultEl.innerHTML = `<span class="err">${esc(e.message)}</span>`;
   }
 });
 
