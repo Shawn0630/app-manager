@@ -78,7 +78,9 @@ cp config/apps.example.json config/apps.json    # then edit
 # edit docker-compose.yml: set MANAGER_PASSWORD, add your app
 # workdir mounts (same absolute paths as on the host!)
 # optional: cp .env.example .env and set MANAGER_PORT to change
-# the dashboard port (default 9000)
+# the dashboard port (default 9000), and HOST_PROJECTS_DIR to the
+# folder holding your projects (mounted same-path; the folder
+# picker opens there)
 docker compose up -d --build                    # http://localhost:9000
 ```
 
@@ -136,6 +138,8 @@ Environment variables for the manager itself:
 | `CONFIG_PATH` | `./config/apps.json` | App registry location. |
 | `DATA_DIR` | `./data` | `deployments.jsonl`, .env backups, trigger state, dynamic env layers (`dynamic/`), generated compose overrides (`overrides/`), in-use env snapshots (`in-use/`). |
 | `APPS_ROOT` | `./apps` | Add App clones new repos into `APPS_ROOT/<id>`. |
+| `BROWSE_ROOT` | _(unset)_ | Start directory of the Add Project folder picker (also its "Projects root" shortcut). Under Docker it is set from `HOST_PROJECTS_DIR` by the manager's compose file; unset, the picker starts at the filesystem root. If it is set but the folder does not exist, the picker falls back to the filesystem root. |
+| `HOST_PROJECTS_DIR` | _(unset)_ | Root-`.env` variable for the manager's own docker-compose.yml (not read by the server directly): the host folder holding your projects. Compose mounts it into the manager container at the same absolute path and points `BROWSE_ROOT` at it, so the folder picker opens there. See "When your project folder does not show up in the picker" below. |
 | `MANAGER_USER` | `admin` | Basic auth user (only with a password). |
 | `MANAGER_PASSWORD` | _(unset)_ | When set, Basic auth protects **all** routes. |
 | `GITHUB_TOKEN` | _(unset)_ | Token for the GitHub Actions API. Required for private repos; raises the rate limit for public ones. |
@@ -235,6 +239,40 @@ dashboard never purges).
 
 Because adding projects rewrites the registry, the config mount in
 the Docker setup is read-write.
+
+### When your project folder does not show up in the picker
+
+The folder picker only lists directories the manager process can
+see. When the manager runs in Docker, a host folder that was never
+mounted into the manager container does not appear at all — opening
+the picker and not finding `/Users` (or your home folder) almost
+always means the mount is missing, not that the picker is broken.
+
+The fix is one variable in the manager's root `.env` (copy
+`.env.example` if you have not already):
+
+```sh
+HOST_PROJECTS_DIR=/Users/you/Files/Project
+```
+
+With it set, the manager's `docker-compose.yml` mounts that folder
+into the container **at the same absolute path**, and the picker
+opens right at it (a "Projects root" shortcut chip appears next to
+"Filesystem root"; where the picker starts is the `BROWSE_ROOT`
+environment variable, which the compose file points at
+`HOST_PROJECTS_DIR`). Then recreate the container:
+
+```sh
+docker compose up -d
+```
+
+A plain `docker compose restart` is **not** enough — restarts do
+not apply new mounts; the container has to be recreated, which
+`up -d` does when the configuration changed. To mount several
+unrelated folders, add same-path volume lines for each of them in
+`docker-compose.yml` (see the commented examples in its volumes
+section); `HOST_PROJECTS_DIR` covers the common one-parent-folder
+case.
 
 ## GitHub Actions as a trigger
 

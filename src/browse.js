@@ -16,19 +16,49 @@ import path from 'node:path';
 import * as git from './git.js';
 import { parseRepo } from './github.js';
 import { detectComposeFile } from './registry.js';
+import { BROWSE_ROOT } from './config.js';
+
+const FS_ROOT = path.parse(process.cwd()).root;
+
+// Quick-jump roots for the picker: always the filesystem root,
+// plus the configured projects root (BROWSE_ROOT) when it is set
+// and is not just the filesystem root again.
+export function browseRoots() {
+  const roots = [{ label: 'Filesystem root', path: FS_ROOT }];
+  if (BROWSE_ROOT && BROWSE_ROOT !== FS_ROOT) {
+    roots.push({ label: 'Projects root', path: BROWSE_ROOT });
+  }
+  return roots;
+}
+
+// Where a path-less browse starts: the configured BROWSE_ROOT when
+// it is set and currently is a directory, else the filesystem root
+// (a configured root that is not mounted yet must not break the
+// picker — it simply falls back, and the folder stays invisible,
+// which is the mount hint working as designed).
+function browseStart() {
+  if (BROWSE_ROOT) {
+    try {
+      if (fs.statSync(BROWSE_ROOT).isDirectory()) return BROWSE_ROOT;
+    } catch {
+      // not there (yet) — fall through to the filesystem root
+    }
+  }
+  return FS_ROOT;
+}
 
 // Browse one directory. `rawPath` undefined/null starts at the
-// filesystem root; anything else must be a non-empty absolute path
-// ("~" is rejected, like in registerLocalApp — nothing expands it
-// here either). Returns:
-//   { path, parent, dirs: [{ name, path }],
+// configured BROWSE_ROOT (filesystem root when unset); anything
+// else must be a non-empty absolute path ("~" is rejected, like in
+// registerLocalApp — nothing expands it here either). Returns:
+//   { path, parent, roots: [{ label, path }], dirs: [{ name, path }],
 //     isGitRepo, gitRemote, githubRepo, branch, composeFile }
 // Errors carry .status (400 bad path / 403 unreadable), in the same
 // style as the registry errors.
 export async function browseDirectory(rawPath) {
   let dir;
   if (rawPath == null) {
-    dir = path.parse(process.cwd()).root;
+    dir = browseStart();
   } else {
     const raw = String(rawPath).trim();
     if (!raw) {
@@ -100,6 +130,7 @@ export async function browseDirectory(rawPath) {
   return {
     path: dir,
     parent: parentDir === dir ? null : parentDir,
+    roots: browseRoots(),
     dirs,
     isGitRepo,
     gitRemote,

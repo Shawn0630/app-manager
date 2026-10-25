@@ -36,6 +36,14 @@ export const DATA_DIR = process.env.DATA_DIR
 export const APPS_ROOT = process.env.APPS_ROOT
   ? path.resolve(process.env.APPS_ROOT)
   : path.join(ROOT, 'apps');
+// Start directory for the Add Project folder picker
+// (GET /api/browse with no path), and the "Projects root"
+// shortcut in that picker. Under Docker it follows
+// HOST_PROJECTS_DIR (see docker-compose.yml / .env.example);
+// unset, the picker starts at the filesystem root.
+export const BROWSE_ROOT = process.env.BROWSE_ROOT
+  ? path.resolve(process.env.BROWSE_ROOT)
+  : null;
 
 const TRIGGERS = new Set(['commit', 'actions', 'both', 'manual']);
 

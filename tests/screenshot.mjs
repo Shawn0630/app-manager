@@ -149,6 +149,9 @@ async function main() {
       FAKE_DOCKER_STATE: path.join(WORK, 'fake-state.json'),
       FAKE_DOCKER_CALLS: path.join(WORK, 'fake-calls.log'),
       GITHUB_API_URL: ghApi,
+      // The folder picker opens at the configured Projects root
+      // (the fixture workdir) and shows both quick-jump chips.
+      BROWSE_ROOT: workdir,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -244,8 +247,10 @@ async function main() {
 
     // Folder browser: prefill the local form's path input with the
     // fixture workdir, open the picker there (it starts at the
-    // typed path) and screenshot it — the probe line should call
-    // out the git repo and the compose file.
+    // typed path — which is also the configured Projects root, so
+    // both root chips render, Projects root active) and screenshot
+    // it — the probe line should call out the git repo and the
+    // compose file.
     await page.evaluate((p) => {
       document.querySelector('#localForm input[name="path"]').value = p;
       document.getElementById('browseBtn').click();

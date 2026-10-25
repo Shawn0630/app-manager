@@ -1168,6 +1168,9 @@ async function main() {
     check('browse: no path starts at the filesystem root',
       r.status === 200 && r.json.path === '/' && r.json.parent === null,
       { path: r.json && r.json.path, parent: r.json && r.json.parent });
+    check('browse: roots without BROWSE_ROOT is just the Filesystem root',
+      JSON.stringify(r.json.roots) === JSON.stringify([{ label: 'Filesystem root', path: '/' }]),
+      r.json.roots);
 
     r = await browse(path.join(browseRoot, 'proj', '..', 'proj'));
     check('browse: path is normalized (dot segments resolved)',
@@ -1182,6 +1185,49 @@ async function main() {
     r = await browse('~/Files/Project');
     check('browse: "~" path -> 400 "not expanded"',
       r.status === 400 && /not expanded/.test(r.json.error || ''), r.json);
+  } finally {
+    await stopManager(mgr);
+  }
+
+  // With BROWSE_ROOT set, a path-less browse starts at the
+  // projects root and the response carries both quick-jump roots;
+  // explicit paths are unaffected. A BROWSE_ROOT that does not
+  // exist falls back to the filesystem root instead of erroring.
+  mgr = startManager({
+    configPath: browseCfg,
+    dataDir: path.join(WORK, 'data-browse'),
+    extraEnv: { BROWSE_ROOT: browseRoot },
+  });
+  try {
+    await waitHealth();
+    let r = await browse(null);
+    check('browse: BROWSE_ROOT set — path-less browse starts at the projects root',
+      r.status === 200 && r.json.path === browseRoot,
+      r.json && r.json.path);
+    check('browse: roots then include the Projects root next to the Filesystem root',
+      JSON.stringify(r.json.roots) === JSON.stringify([
+        { label: 'Filesystem root', path: '/' },
+        { label: 'Projects root', path: browseRoot },
+      ]),
+      r.json.roots);
+    r = await browse(browseProj);
+    check('browse: explicit path is unaffected by BROWSE_ROOT, roots still returned',
+      r.status === 200 && r.json.path === browseProj
+        && (r.json.roots || []).some((x) => x.label === 'Projects root' && x.path === browseRoot),
+      { path: r.json && r.json.path, roots: r.json && r.json.roots });
+  } finally {
+    await stopManager(mgr);
+  }
+  mgr = startManager({
+    configPath: browseCfg,
+    dataDir: path.join(WORK, 'data-browse'),
+    extraEnv: { BROWSE_ROOT: path.join(WORK, 'no-such-projects-dir') },
+  });
+  try {
+    await waitHealth();
+    const r = await browse(null);
+    check('browse: a nonexistent BROWSE_ROOT falls back to the filesystem root',
+      r.status === 200 && r.json.path === '/', r.json && r.json.path);
   } finally {
     await stopManager(mgr);
   }

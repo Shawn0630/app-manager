@@ -20,6 +20,11 @@ services:
       # Optional: needed to watch private repos' GitHub Actions (and
       # raises the API rate limit for public ones). See README.
       # GITHUB_TOKEN: "ghp_..."
+      # Folder picker start directory for Add Project → "from a
+      # local folder": follows HOST_PROJECTS_DIR (see the mount
+      # below), so the picker opens at your projects folder instead
+      # of the container's filesystem root. "/" when unset.
+      BROWSE_ROOT: ${HOST_PROJECTS_DIR:-/}
     volumes:
       # The manager drives the HOST Docker daemon through this socket.
       # (This is effectively root access to the host — see README.)
@@ -43,4 +48,14 @@ services:
       # one mount (this is also what Add Project → "from a local
       # folder" needs before the folder can be registered):
       # - /Users/you/Files/Project:/Users/you/Files/Project
+      # The same mount, driven by .env instead of editing this file:
+      # set HOST_PROJECTS_DIR in the root .env to the host folder
+      # that holds your projects (for example
+      # HOST_PROJECTS_DIR=/Users/you/Files/Project). It is mounted at
+      # the SAME absolute path inside the container, and the folder
+      # picker opens right there (BROWSE_ROOT above follows it).
+      # Left unset, this mounts /tmp as a harmless placeholder.
+      # NOTE: changing the mount needs `docker compose up -d` —
+      # a plain `docker compose restart` does NOT apply new mounts.
+      - ${HOST_PROJECTS_DIR:-/tmp}:${HOST_PROJECTS_DIR:-/tmp}
     restart: unless-stopped

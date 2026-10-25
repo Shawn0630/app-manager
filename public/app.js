@@ -814,6 +814,7 @@ localForm.addEventListener('submit', async (ev) => {
 // The probe line mirrors what registration would detect for the
 // folder (git repo root? GitHub remote? compose file?).
 const browseModal = $('browseModal');
+const browseRootsEl = $('browseRoots');
 const browsePathEl = $('browsePath');
 const browseProbeEl = $('browseProbe');
 const browseListEl = $('browseList');
@@ -825,6 +826,15 @@ let browseState = null; // last /api/browse response
 
 function renderBrowse() {
   if (!browseState) return;
+  // Quick-jump chips from the server's roots list (filesystem root,
+  // plus the configured projects root when there is one). A chip is
+  // highlighted while the picker is at — or inside — that root.
+  const roots = browseState.roots || [];
+  browseRootsEl.innerHTML = roots.map((r) => {
+    const active = browseState.path === r.path
+      || (r.path !== '/' && browseState.path.startsWith(`${r.path}/`));
+    return `<button type="button" class="browse-chip${active ? ' browse-chip-active' : ''}" data-root="${esc(r.path)}" title="${esc(r.path)}">${esc(r.label)}</button>`;
+  }).join('');
   browsePathEl.textContent = browseState.path;
   browseUpBtn.disabled = !browseState.parent;
   const parts = [];
@@ -862,13 +872,16 @@ async function browseTo(dir) {
 async function openBrowse() {
   browseModal.classList.remove('hidden');
   browseState = null;
+  browseRootsEl.innerHTML = '';
   browsePathEl.textContent = 'Loading…';
   browseProbeEl.textContent = '';
   browseListEl.innerHTML = '';
   browseErrEl.textContent = '';
   // Start where the user already typed (when it looks like an
-  // absolute path); if that folder cannot be shown, fall back to
-  // the filesystem root and keep the error visible.
+  // absolute path); otherwise the server decides (its configured
+  // projects root, else the filesystem root). If the typed folder
+  // cannot be shown, retry at the server start and keep the error
+  // visible.
   const typed = localPathInput.value.trim();
   const ok = await browseTo(typed.startsWith('/') ? typed : null);
   if (!ok && typed.startsWith('/')) browseTo(null);
@@ -882,6 +895,10 @@ browseModal.addEventListener('click', (ev) => {
 browseListEl.addEventListener('click', (ev) => {
   const btn = ev.target.closest('button[data-dir]');
   if (btn) browseTo(btn.dataset.dir);
+});
+browseRootsEl.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-root]');
+  if (btn) browseTo(btn.dataset.root);
 });
 browseUpBtn.addEventListener('click', () => {
   if (browseState && browseState.parent) browseTo(browseState.parent);
