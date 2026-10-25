@@ -363,6 +363,13 @@ main { padding: 20px 22px 40px; max-width: 1220px; margin: 0 auto; }
   padding: 1px 6px;
   white-space: nowrap;
 }
+/* Port row note when the registered port disagrees with the
+   actual published port (the link itself already points at the
+   actual one). */
+.port-note { color: var(--amber); font-size: 12px; font-weight: 600; white-space: nowrap; }
+/* The registered port standing in for a stopped app: an expected
+   port, not a confirmed one, so the link is muted. */
+a.port-expected { color: var(--muted); }
 
 /* busy note + spinner */
 .busy-note {

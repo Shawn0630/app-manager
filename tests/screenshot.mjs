@@ -103,6 +103,12 @@ async function main() {
   await gitC(seed, ['remote', 'add', 'origin', remote]);
   await gitC(seed, ['push', 'origin', 'main']);
   await sh('git', ['clone', remote, workdir]);
+  // Second app whose REGISTERED port (9999) disagrees with the
+  // port the fake compose actually publishes (8088): its card
+  // shows the effective-port rule — actual port as the link, plus
+  // a "⚠ registered: 9999" note.
+  const workdir2 = path.join(WORK, 'app-stale');
+  await sh('git', ['clone', remote, workdir2]);
   fs.mkdirSync(path.join(workdir, 'src'), { recursive: true });
   fs.writeFileSync(path.join(workdir, '.env'), '# demo app settings\nAPP_NAME=demo\nAPI_KEY=sk-demo-123456\nDEBUG=false\n');
   const { stdout: headOut } = await gitC(workdir, ['rev-parse', 'HEAD']);
@@ -136,6 +142,10 @@ async function main() {
       id: 'demo-app', name: 'Demo App', repoUrl: 'https://github.com/test-owner/test-repo.git', workdir, branch: 'main',
       composeFile: 'docker-compose.yml', projectName: 'demoapp', port: 8088,
       autoDeploy: true, pollIntervalSec: 2, provider: 'builtin', envFile: '.env', trigger: 'actions',
+    }, {
+      id: 'stale-app', name: 'Stale Port App', repoUrl: remote, workdir: workdir2, branch: 'main',
+      composeFile: 'docker-compose.yml', projectName: 'staleapp', port: 9999,
+      autoDeploy: false, pollIntervalSec: 3600, provider: 'builtin', envFile: '.env',
     }],
   }, null, 1));
 
@@ -176,6 +186,15 @@ async function main() {
       const s = await api('GET', '/api/apps');
       const a = s.json && s.json.apps[0];
       if (a && a.state === 'running' && !a.busy) break;
+      await sleep(300);
+    }
+    // Start the stale-port app too, so the Apps screenshot shows
+    // its Port row on the actual port with the mismatch note.
+    await api('POST', '/api/apps/stale-app/start');
+    for (let i = 0; i < 60; i += 1) {
+      const s = await api('GET', '/api/apps');
+      const a = s.json && s.json.apps.find((x) => x.id === 'stale-app');
+      if (a && a.state === 'running' && a.portMismatch) break;
       await sleep(300);
     }
     // Save a dynamic layer: DEBUG overrides the static value,

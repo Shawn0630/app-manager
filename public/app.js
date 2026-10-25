@@ -108,6 +108,25 @@ function containersHtml(a) {
   return `<div class="containers">${items.join('')}</div>`;
 }
 
+// The Port row follows the effective port the API computed:
+// the actual published port while the app runs (a plain link),
+// the registered port as the expected port when stopped (muted,
+// "(expected)"), and — when the two disagree — a note naming the
+// stale registered value.
+function portValue(a) {
+  const eff = a.effectivePort != null ? a.effectivePort : a.port;
+  if (!eff) return '—';
+  const cls = a.portSource === 'configured' && !a.portMismatch ? ' class="port-expected"' : '';
+  const link = `<a${cls} href="http://${esc(location.hostname)}:${eff}" target="_blank" rel="noopener">${eff}</a>`;
+  if (a.portMismatch) {
+    return `${link} <span class="port-note">⚠ registered: ${esc(a.port)}</span>`;
+  }
+  if (a.portSource === 'configured') {
+    return `${link} <span class="muted">(expected)</span>`;
+  }
+  return link;
+}
+
 function actionsValue(a) {
   if (a.trigger !== 'actions' && a.trigger !== 'both') return '';
   if (a.lastActionsError) {
@@ -129,9 +148,7 @@ function statePill(a) {
 function cardHtml(a) {
   const busy = a.busy ? a.busy.op : null;
   const disabled = busy ? 'disabled' : '';
-  const portLink = a.port
-    ? `<a href="http://${esc(location.hostname)}:${a.port}" target="_blank" rel="noopener">${a.port}</a>`
-    : '—';
+  const portLink = portValue(a);
   const commitLine = a.commit
     ? `<span class="hash">${esc(a.commit.short)}</span> <span class="subject">${esc(a.commit.subject || '')}</span>`
     : a.source === 'local' && !a.repoUrl

@@ -4,6 +4,38 @@ import * as git from './git.js';
 import { lastDeploymentFor } from './deployments.js';
 import { appState } from './store.js';
 
+// The port story has two sources: the port registered for the
+// app (app.port, from Add Project / config) and the port the app
+// actually publishes at runtime (compose ps Publishers, decided by
+// the app's own compose file and .env). While a container is
+// running, the ACTUAL published port is the truth — the registered
+// value is only the expected port, shown when nothing is running
+// (or ps failed). portMismatch flags a stale registration so the
+// dashboard can say so instead of linking to a dead port.
+export function effectivePortOf(app, containers) {
+  let actual = null;
+  for (const c of containers || []) {
+    if (!c || c.state !== 'running') continue;
+    const pub = (c.ports || []).find((p) => p && p.published);
+    if (pub) {
+      actual = Number(pub.published);
+      break;
+    }
+  }
+  const registered = app.port != null && app.port !== '' ? Number(app.port) : null;
+  if (actual != null) {
+    return {
+      effectivePort: actual,
+      portSource: 'actual',
+      portMismatch: registered != null && registered !== actual,
+    };
+  }
+  if (registered != null) {
+    return { effectivePort: registered, portSource: 'configured', portMismatch: false };
+  }
+  return { effectivePort: null, portSource: null, portMismatch: false };
+}
+
 export async function appStatus(app) {
   const st = appState(app.id);
   const [ps, localResult] = await Promise.all([
@@ -22,6 +54,7 @@ export async function appStatus(app) {
       }
     : null;
   const behind = Boolean(st.remoteHead && commit && st.remoteHead !== commit.head);
+  const { effectivePort, portSource, portMismatch } = effectivePortOf(app, ps.containers);
   return {
     id: app.id,
     name: app.name,
@@ -30,6 +63,12 @@ export async function appStatus(app) {
     branch: app.branch,
     workdir: app.workdir,
     port: app.port,
+    // Effective port (actual published port while running, else
+    // the registered one), where it came from, and whether the
+    // registration disagrees with reality. See effectivePortOf.
+    effectivePort,
+    portSource,
+    portMismatch,
     envFile: app.envFile,
     autoDeploy: app.autoDeploy,
     pollIntervalSec: app.pollIntervalSec,

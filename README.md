@@ -121,7 +121,7 @@ docker compose up -d --build                    # http://localhost:9000
 | `branch` | no | `main` | Branch to watch and deploy. |
 | `composeFile` | no | `docker-compose.yml` | Compose file, relative to `workdir`. |
 | `projectName` | no | = id | Compose project name (`-p`). |
-| `port` | no | null | Main port, shown as a link in the dashboard. |
+| `port` | no | null | Registered main port. While the app runs, the dashboard's Port link follows the **actual** published port (from `compose ps`); when stopped it falls back to this value, marked "(expected)". If the two disagree, the card links to the actual port and flags this one as stale (`⚠ registered: …`). The status API reports this as `effectivePort` / `portSource` (`actual` \| `configured`) / `portMismatch` alongside the raw `port`. |
 | `autoDeploy` | no | false | Master switch for automatic deployments. |
 | `pollIntervalSec` | no | 120 | Poll interval per app, in seconds. |
 | `trigger` | no | `commit` | Auto-deploy source: `commit`, `actions`, `both`, or `manual` (nothing automatic). |

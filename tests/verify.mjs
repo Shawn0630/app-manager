@@ -1252,6 +1252,61 @@ async function main() {
     await stopManager(mgr);
   }
 
+  // ---- Phase: effective port (actual wins while running) ----
+  // The fake docker always publishes 8088. port-app registers
+  // 9999, so its registered port is stale the moment it runs;
+  // match-app registers 8088 and agrees with reality.
+  const portCfg = path.join(WORK, 'apps.port.json');
+  fs.writeFileSync(portCfg, JSON.stringify({
+    apps: [
+      { ...appBase, id: 'port-app', name: 'Port App', projectName: 'portapp', port: 9999, autoDeploy: false, pollIntervalSec: 120 },
+      { ...appBase, id: 'match-app', name: 'Match App', projectName: 'matchapp', port: 8088, autoDeploy: false, pollIntervalSec: 120 },
+    ],
+  }, null, 1));
+  mgr = startManager({ configPath: portCfg, dataDir });
+  try {
+    await waitHealth();
+    let p = await getById('port-app');
+    check('port: stopped app falls back to the registered port',
+      p.effectivePort === 9999 && p.portSource === 'configured' && p.portMismatch === false,
+      { effectivePort: p.effectivePort, portSource: p.portSource, portMismatch: p.portMismatch });
+    let m = await getById('match-app');
+    check('port: stopped matching app also starts from "configured"',
+      m.effectivePort === 8088 && m.portSource === 'configured' && m.portMismatch === false,
+      { effectivePort: m.effectivePort, portSource: m.portSource, portMismatch: m.portMismatch });
+
+    let r = await api('POST', '/api/apps/port-app/start');
+    check('port: POST start port-app -> 202', r.status === 202, r.status);
+    p = await waitFor('port-app running with actual port', async () => {
+      const x = await getById('port-app');
+      return x && x.state === 'running' && x.portSource === 'actual' ? x : false;
+    });
+    check('port: while running, the actual published port wins',
+      p.effectivePort === 8088 && p.portMismatch === true && p.port === 9999,
+      { effectivePort: p.effectivePort, portMismatch: p.portMismatch, port: p.port });
+
+    r = await api('POST', '/api/apps/match-app/start');
+    check('port: POST start match-app -> 202', r.status === 202, r.status);
+    m = await waitFor('match-app running with actual port', async () => {
+      const x = await getById('match-app');
+      return x && x.state === 'running' && x.portSource === 'actual' ? x : false;
+    });
+    check('port: registered == actual -> actual source, no mismatch',
+      m.effectivePort === 8088 && m.portMismatch === false,
+      { effectivePort: m.effectivePort, portMismatch: m.portMismatch });
+
+    await api('POST', '/api/apps/port-app/stop');
+    p = await waitFor('port-app stopped, back to configured', async () => {
+      const x = await getById('port-app');
+      return x && x.state === 'stopped' && x.portSource === 'configured' ? x : false;
+    });
+    check('port: after stop, effective port falls back to the registered one',
+      p.effectivePort === 9999 && p.portMismatch === false,
+      { effectivePort: p.effectivePort, portMismatch: p.portMismatch });
+  } finally {
+    await stopManager(mgr);
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
