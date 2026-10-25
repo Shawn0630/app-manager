@@ -1,4 +1,5 @@
-// Config loading: CONFIG_PATH / DATA_DIR / PORT come from the environment,
+// Config loading: CONFIG_PATH / DATA_DIR / PORT come from the
+// environment (PORT falls back to MANAGER_PORT in the root .env),
 // everything else has a default.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,7 +7,25 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-export const PORT = Number(process.env.PORT) || 9000;
+// Listen port: the PORT environment variable wins. When it is unset
+// (plain `npm start`), fall back to MANAGER_PORT in the project-root
+// .env — the same file docker compose reads — so both run modes
+// agree on the port. Default 9000.
+function resolvePort() {
+  if (process.env.PORT) return Number(process.env.PORT) || 9000;
+  try {
+    const text = fs.readFileSync(path.join(ROOT, '.env'), 'utf8');
+    for (const line of text.split('\n')) {
+      const m = line.match(/^\s*MANAGER_PORT\s*=\s*(\d+)\s*$/);
+      if (m) return Number(m[1]);
+    }
+  } catch {
+    // No root .env — the default below applies.
+  }
+  return 9000;
+}
+
+export const PORT = resolvePort();
 export const CONFIG_PATH = process.env.CONFIG_PATH
   ? path.resolve(process.env.CONFIG_PATH)
   : path.join(ROOT, 'config', 'apps.json');

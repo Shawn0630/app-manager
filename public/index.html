@@ -120,6 +120,9 @@
           <button type="submit" class="btn btn-primary">Add Project</button>
           <span id="localMsg" class="muted"></span>
         </form>
+        <p class="note">Full absolute path required — <code>~</code> is not expanded. The
+          folder must be mounted into the manager container at the same absolute
+          path; see the volumes section of the manager's docker-compose.yml.</p>
         <p class="note">If the folder is a git repository with a GitHub remote, it gets the
           full feature set — commit polling, GitHub Actions watching and pull-based
           deploys — just like a cloned project. Auto-deploy pulls and rebuilds

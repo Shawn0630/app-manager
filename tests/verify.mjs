@@ -923,6 +923,22 @@ async function main() {
   try {
     await waitHealth();
 
+    // -- Registration: bad paths fail with self-explaining errors --
+    // A "~" path must NOT be resolved into "<cwd>/~/..." nonsense;
+    // a folder the manager cannot see (not mounted into its
+    // container) must name the mount fix, not just "not found".
+    const tilde = await postApp({ source: 'local', path: '~/Files/Project/algorithm-visualizer' });
+    check('local register: "~" path -> 400, error says it is not expanded and echoes the input',
+      tilde.status === 400 && /not expanded/.test(tilde.json.error || '')
+        && (tilde.json.error || '').includes('~/Files/Project/algorithm-visualizer'),
+      tilde.json);
+    const missing = await postApp({ source: 'local', path: '/definitely/not/here/nope' });
+    check('local register: unseen folder -> 400, error carries the mount hint',
+      missing.status === 400 && /mount/i.test(missing.json.error || ''),
+      missing.json);
+    check('local register: rejected paths register nothing',
+      (await api('GET', '/api/apps')).json.apps.length === 0);
+
     // -- Registration: GitHub-connected local folder --
     const reg = await postApp({
       source: 'local', path: localGh, trigger: 'actions', autoDeploy: true, pollIntervalSec: 2,
@@ -1036,6 +1052,55 @@ async function main() {
   } finally {
     await stopManager(mgr);
     mockServer8.close();
+  }
+
+  // ---- Phase 9: PORT falls back to MANAGER_PORT in the root .env ----
+  // config.js: with PORT unset, the server reads MANAGER_PORT from
+  // <repo root>/.env (the same file docker compose uses). The .env
+  // is written only for this phase — any pre-existing one is backed
+  // up and restored, otherwise the file is removed again.
+  {
+    const envFile = path.join(ROOT, '.env');
+    const envBackup = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : null;
+    const fallbackPort = 19099;
+    const fallbackCfg = path.join(WORK, 'apps.fallback.json');
+    fs.writeFileSync(fallbackCfg, JSON.stringify({ apps: [] }, null, 1));
+    fs.writeFileSync(envFile, `# written by tests/verify.mjs, removed again below\nMANAGER_PORT=${fallbackPort}\n`);
+    const childEnv = { ...process.env };
+    delete childEnv.PORT;
+    const proc = spawn('node', [path.join(ROOT, 'src', 'server.js')], {
+      env: {
+        ...childEnv,
+        PATH: `${path.join(ROOT, 'tests', 'fake-bin')}:${process.env.PATH}`,
+        CONFIG_PATH: fallbackCfg,
+        DATA_DIR: path.join(WORK, 'data-fallback'),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let logBuf = '';
+    proc.stdout.on('data', (d) => { logBuf += String(d); });
+    proc.stderr.on('data', (d) => { logBuf += String(d); });
+    try {
+      const up = await waitFor('manager on the .env fallback port', async () => {
+        try {
+          const r = await fetch(`http://127.0.0.1:${fallbackPort}/api/health`);
+          return r.status === 200;
+        } catch {
+          return false;
+        }
+      }, 15_000).catch(() => false);
+      check('PORT unset: server listens on MANAGER_PORT from the root .env',
+        up === true, logBuf.trim().split('\n').slice(-2));
+      check('startup log line names the fallback port',
+        logBuf.includes(`listening on http://0.0.0.0:${fallbackPort}`),
+        logBuf.trim().split('\n').slice(-2));
+    } finally {
+      await stopManager(proc);
+      if (envBackup == null) fs.rmSync(envFile, { force: true });
+      else fs.writeFileSync(envFile, envBackup);
+    }
+    check('root .env cleaned up after the fallback phase',
+      envBackup == null ? !fs.existsSync(envFile) : fs.readFileSync(envFile, 'utf8') === envBackup);
   }
 
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

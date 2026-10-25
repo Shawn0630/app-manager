@@ -6,8 +6,13 @@ services:
     image: app-manager
     container_name: app-manager
     ports:
-      - "9000:9000"
+      # Dashboard port, driven by MANAGER_PORT in the root .env file
+      # (see .env.example; default 9000). Host port, container port
+      # and the PORT the server listens on all follow it, so the
+      # "listening on" log line always matches the published port.
+      - "${MANAGER_PORT:-9000}:${MANAGER_PORT:-9000}"
     environment:
+      PORT: ${MANAGER_PORT:-9000}
       # Set a real password before exposing the dashboard on the LAN —
       # it can start/stop containers and edit .env files.
       MANAGER_USER: admin
@@ -34,4 +39,8 @@ services:
       # inside the container, git works on the wrong tree and the
       # daemon looks for files that do not exist. Example:
       # - /home/you/apps:/home/you/apps
+      # Mounting a PARENT folder covers every project inside it with
+      # one mount (this is also what Add Project → "from a local
+      # folder" needs before the folder can be registered):
+      # - /Users/you/Files/Project:/Users/you/Files/Project
     restart: unless-stopped

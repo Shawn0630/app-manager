@@ -77,6 +77,8 @@ npm start                                       # http://localhost:9000
 cp config/apps.example.json config/apps.json    # then edit
 # edit docker-compose.yml: set MANAGER_PASSWORD, add your app
 # workdir mounts (same absolute paths as on the host!)
+# optional: cp .env.example .env and set MANAGER_PORT to change
+# the dashboard port (default 9000)
 docker compose up -d --build                    # http://localhost:9000
 ```
 
@@ -129,7 +131,8 @@ Environment variables for the manager itself:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PORT` | `9000` | Listen port. |
+| `PORT` | `9000` | Listen port. Under Docker it is set from `MANAGER_PORT` by the manager's compose file; with plain `npm start` it falls back to `MANAGER_PORT` in the root `.env` when `PORT` itself is unset. |
+| `MANAGER_PORT` | `9000` | The manager's own dashboard port in the root `.env` (copy `.env.example` to `.env`): drives the host port, container port and `PORT` in the manager's docker-compose.yml, and the `npm start` fallback above. After changing it, re-run `docker compose up -d`. |
 | `CONFIG_PATH` | `./config/apps.json` | App registry location. |
 | `DATA_DIR` | `./data` | `deployments.jsonl`, .env backups, trigger state, dynamic env layers (`dynamic/`), generated compose overrides (`overrides/`), in-use env snapshots (`in-use/`). |
 | `APPS_ROOT` | `./apps` | Add App clones new repos into `APPS_ROOT/<id>`. |
@@ -181,8 +184,13 @@ immediately, no restart).
 **From a local folder** — give the path of a folder that already
 exists on the machine. It is registered **in place**
 (`source: "local"`, workdir = the folder itself): nothing is
-copied, moved, or cloned. The server detects the compose file the
-same way, and:
+copied, moved, or cloned. The path must be a full absolute path —
+`~` is not expanded — and when the manager itself runs in Docker
+the folder must be mounted into the manager container at that same
+absolute path (see the volumes comments in the manager's
+`docker-compose.yml`), or registration fails with a "local folder
+not found" error that says exactly that. The server detects the
+compose file the same way, and:
 
 - If the folder is the root of a git repository, its
   `remote.origin.url` is read and stored as the app's `repoUrl`,

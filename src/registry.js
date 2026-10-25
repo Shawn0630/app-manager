@@ -119,9 +119,22 @@ export async function registerLocalApp(input, existingIds) {
     err.status = 400;
     throw err;
   }
+  // Nothing expands "~" here — path.resolve would silently turn it
+  // into "<cwd>/~/...". Say so instead of reporting a nonsense path.
+  if (rawPath.startsWith('~')) {
+    const err = new Error(`path must be the full absolute path — "~" is not expanded (you entered: ${rawPath})`);
+    err.status = 400;
+    throw err;
+  }
   const workdir = path.resolve(rawPath);
   if (!fs.existsSync(workdir) || !fs.statSync(workdir).isDirectory()) {
-    const err = new Error(`local folder not found: ${workdir}`);
+    // From the manager's point of view (usually a container) a host
+    // folder that was never mounted in simply does not exist. The
+    // bare "not found" used to leave users guessing, so name the fix.
+    const err = new Error(
+      `local folder not found: ${workdir} — the manager can only see folders mounted into its container. `
+      + "Add a same-path volume mount for this folder (or its parent directory) in the manager's docker-compose.yml, restart the manager, then enter the full absolute path.",
+    );
     err.status = 400;
     throw err;
   }
