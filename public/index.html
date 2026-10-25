@@ -87,10 +87,13 @@
           managed <b>in place</b> — nothing is copied or moved, and removing the
           project later only unregisters it; the folder is never deleted.</p>
         <form id="localForm">
-          <label class="field grow">
+          <div class="field grow">
             <span>Folder path</span>
-            <input name="path" type="text" placeholder="/Users/you/Projects/my-app" required>
-          </label>
+            <span class="path-row">
+              <input name="path" type="text" placeholder="/Users/you/Projects/my-app" required>
+              <button id="browseBtn" type="button" class="btn">Browse…</button>
+            </span>
+          </div>
           <label class="field">
             <span>Name</span>
             <input name="name" type="text" placeholder="Default: folder name">
@@ -201,6 +204,28 @@
           <button id="dynSave" type="button" class="btn btn-primary">Save dynamic</button>
         </div>
       </section>
+    </div>
+  </div>
+</div>
+<div id="browseModal" class="modal hidden">
+  <div class="modal-box browse-box">
+    <div class="modal-head">
+      <span>Choose a folder</span>
+      <button id="browseClose" type="button" class="btn btn-small">Close</button>
+    </div>
+    <div class="browse-body">
+      <div id="browsePath" class="browse-crumb mono">/</div>
+      <div id="browseProbe" class="browse-probe"></div>
+      <div id="browseList" class="browse-list"></div>
+      <div id="browseErr" class="err"></div>
+      <p class="note browse-note">Only folders mounted into the manager container appear
+        here — if a folder is missing, it has not been mounted yet (see the volumes
+        section of the manager's docker-compose.yml).</p>
+    </div>
+    <div class="modal-foot">
+      <button id="browseUp" type="button" class="btn">↑ Up one level</button>
+      <span class="browse-spacer"></span>
+      <button id="browseUse" type="button" class="btn btn-primary">Use this folder</button>
     </div>
   </div>
 </div>

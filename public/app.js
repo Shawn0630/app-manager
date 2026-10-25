@@ -804,3 +804,96 @@ localForm.addEventListener('submit', async (ev) => {
   const body = { ...formExtras(fd), source: 'local', path: String(fd.get('path') || '').trim() };
   submitAdd(body, localMsg, localForm, 'Registering…');
 });
+
+// ---------- Folder browser (server-side directory picker) ----------
+// A web page cannot open the OS file dialog, so the manager lists
+// its OWN filesystem instead: the picker walks the directories the
+// manager process can see, one level at a time. A folder that was
+// never mounted into the manager container never appears — the
+// same-path mount requirement becomes visible instead of an error.
+// The probe line mirrors what registration would detect for the
+// folder (git repo root? GitHub remote? compose file?).
+const browseModal = $('browseModal');
+const browsePathEl = $('browsePath');
+const browseProbeEl = $('browseProbe');
+const browseListEl = $('browseList');
+const browseErrEl = $('browseErr');
+const browseUpBtn = $('browseUp');
+const localPathInput = localForm.querySelector('input[name="path"]');
+const localNameInput = localForm.querySelector('input[name="name"]');
+let browseState = null; // last /api/browse response
+
+function renderBrowse() {
+  if (!browseState) return;
+  browsePathEl.textContent = browseState.path;
+  browseUpBtn.disabled = !browseState.parent;
+  const parts = [];
+  if (browseState.isGitRepo) {
+    parts.push(browseState.githubRepo
+      ? `Git repository · GitHub: ${browseState.githubRepo}`
+      : 'Git repository');
+    if (browseState.branch) parts.push(`branch ${browseState.branch}`);
+  } else {
+    parts.push('Not a git repository');
+  }
+  parts.push(browseState.composeFile
+    ? `${browseState.composeFile} found`
+    : 'No compose file here');
+  browseProbeEl.textContent = parts.join(' · ');
+  browseListEl.innerHTML = (browseState.dirs || []).length
+    ? browseState.dirs.map((d) =>
+      `<button type="button" class="browse-item" data-dir="${esc(d.path)}"><span class="browse-icon">📁</span><span class="browse-name">${esc(d.name)}</span></button>`).join('')
+    : '<div class="empty">No subfolders here.</div>';
+}
+
+async function browseTo(dir) {
+  browseErrEl.textContent = '';
+  try {
+    const q = dir ? `?path=${encodeURIComponent(dir)}` : '';
+    browseState = await api(`/api/browse${q}`);
+    renderBrowse();
+    return true;
+  } catch (e) {
+    browseErrEl.textContent = e.message;
+    return false;
+  }
+}
+
+async function openBrowse() {
+  browseModal.classList.remove('hidden');
+  browseState = null;
+  browsePathEl.textContent = 'Loading…';
+  browseProbeEl.textContent = '';
+  browseListEl.innerHTML = '';
+  browseErrEl.textContent = '';
+  // Start where the user already typed (when it looks like an
+  // absolute path); if that folder cannot be shown, fall back to
+  // the filesystem root and keep the error visible.
+  const typed = localPathInput.value.trim();
+  const ok = await browseTo(typed.startsWith('/') ? typed : null);
+  if (!ok && typed.startsWith('/')) browseTo(null);
+}
+
+$('browseBtn').addEventListener('click', openBrowse);
+$('browseClose').addEventListener('click', () => browseModal.classList.add('hidden'));
+browseModal.addEventListener('click', (ev) => {
+  if (ev.target === browseModal) browseModal.classList.add('hidden');
+});
+browseListEl.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-dir]');
+  if (btn) browseTo(btn.dataset.dir);
+});
+browseUpBtn.addEventListener('click', () => {
+  if (browseState && browseState.parent) browseTo(browseState.parent);
+});
+$('browseUse').addEventListener('click', () => {
+  if (!browseState) return;
+  localPathInput.value = browseState.path;
+  // Prefill the name from the folder, unless the user typed one.
+  if (!localNameInput.value.trim()) {
+    const base = browseState.path.replace(/\/+$/, '').split('/').pop();
+    if (base) localNameInput.value = base;
+  }
+  browseModal.classList.add('hidden');
+  localMsg.textContent = '';
+});

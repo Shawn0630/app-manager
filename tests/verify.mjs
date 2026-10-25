@@ -1103,6 +1103,109 @@ async function main() {
       envBackup == null ? !fs.existsSync(envFile) : fs.readFileSync(envFile, 'utf8') === envBackup);
   }
 
+  // ---- Phase 10: folder browser (/api/browse) ----
+  // The picker for Add Project → local folder: it lists the
+  // directories the manager itself can see, one level at a time,
+  // and probes the current folder with the same git/compose
+  // detection registration uses.
+  const browseRoot = path.join(WORK, 'browse-root');
+  const browseProj = path.join(browseRoot, 'proj');
+  const browseOuter = path.join(browseRoot, 'outer');
+  fs.mkdirSync(path.join(browseProj, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(browseOuter, 'inner'), { recursive: true });
+  fs.mkdirSync(path.join(browseRoot, 'plain-dir'), { recursive: true });
+  fs.writeFileSync(path.join(browseProj, 'docker-compose.yml'), 'services:\n  web:\n    image: nginx:alpine\n');
+  fs.writeFileSync(path.join(browseRoot, 'afile.txt'), 'not a folder\n');
+  fs.symlinkSync(browseProj, path.join(browseRoot, 'link-to-proj'));
+  await sh('git', ['init', '-b', 'main', browseProj]);
+  await gitC(browseProj, ['config', 'user.name', 'Verify Bot']);
+  await gitC(browseProj, ['config', 'user.email', 'verify@example.com']);
+  await gitC(browseProj, ['add', '.']);
+  await gitC(browseProj, ['-c', 'commit.gpgsign=false', 'commit', '-m', 'init']);
+  await gitC(browseProj, ['remote', 'add', 'origin', GH_URL]);
+  await sh('git', ['init', '-b', 'main', browseOuter]);
+
+  const browseCfg = path.join(WORK, 'apps.browse.json');
+  fs.writeFileSync(browseCfg, JSON.stringify({ apps: [] }, null, 1));
+  const browse = (p, headers) => api('GET',
+    p == null ? '/api/browse' : `/api/browse?path=${encodeURIComponent(p)}`, headers);
+  mgr = startManager({ configPath: browseCfg, dataDir: path.join(WORK, 'data-browse') });
+  try {
+    await waitHealth();
+    let r = await browse(browseRoot);
+    const names = (r.json.dirs || []).map((d) => d.name);
+    check('browse: lists subdirectories only (files excluded, symlink to a dir counts)',
+      r.status === 200 && names.includes('proj') && names.includes('plain-dir') && names.includes('outer')
+        && names.includes('link-to-proj') && !names.includes('afile.txt'),
+      names);
+    check('browse: path + parent reported',
+      r.json.path === browseRoot && r.json.parent === path.dirname(browseRoot),
+      { path: r.json.path, parent: r.json.parent });
+    check('browse: plain folder probe — not a git repo, no compose file',
+      r.json.isGitRepo === false && r.json.composeFile === null && r.json.gitRemote === null,
+      { isGitRepo: r.json.isGitRepo, composeFile: r.json.composeFile });
+
+    r = await browse(browseProj);
+    check('browse: git repo root probe (remote, GitHub owner/repo, branch, compose file)',
+      r.json.isGitRepo === true && r.json.gitRemote === GH_URL
+        && r.json.githubRepo === 'test-owner/test-repo'
+        && r.json.branch === 'main' && r.json.composeFile === 'docker-compose.yml',
+      {
+        isGitRepo: r.json.isGitRepo, gitRemote: r.json.gitRemote,
+        githubRepo: r.json.githubRepo, branch: r.json.branch, composeFile: r.json.composeFile,
+      });
+    check('browse: descending — proj lists its subfolder with its full path',
+      (r.json.dirs || []).some((d) => d.name === 'src' && d.path === path.join(browseProj, 'src')),
+      r.json.dirs);
+    check('browse: parent of proj is the browse root (up one level)',
+      r.json.parent === browseRoot, r.json.parent);
+
+    r = await browse(path.join(browseOuter, 'inner'));
+    check('browse: a folder nested inside another repo is NOT a git repo root',
+      r.status === 200 && r.json.isGitRepo === false, r.json.isGitRepo);
+
+    r = await browse(null);
+    check('browse: no path starts at the filesystem root',
+      r.status === 200 && r.json.path === '/' && r.json.parent === null,
+      { path: r.json && r.json.path, parent: r.json && r.json.parent });
+
+    r = await browse(path.join(browseRoot, 'proj', '..', 'proj'));
+    check('browse: path is normalized (dot segments resolved)',
+      r.status === 200 && r.json.path === browseProj, r.json && r.json.path);
+
+    r = await browse(path.join(browseRoot, 'does-not-exist'));
+    check('browse: missing folder -> 400 "folder not found"',
+      r.status === 400 && /folder not found/.test(r.json.error || ''), r.json);
+    r = await browse(path.join(browseRoot, 'afile.txt'));
+    check('browse: a file path -> 400 "not a folder"',
+      r.status === 400 && /not a folder/.test(r.json.error || ''), r.json);
+    r = await browse('~/Files/Project');
+    check('browse: "~" path -> 400 "not expanded"',
+      r.status === 400 && /not expanded/.test(r.json.error || ''), r.json);
+  } finally {
+    await stopManager(mgr);
+  }
+
+  // The picker sits behind the same Basic auth as every other
+  // route — an unauthenticated request must not list anything.
+  mgr = startManager({
+    configPath: browseCfg,
+    dataDir: path.join(WORK, 'data-browse'),
+    extraEnv: { MANAGER_PASSWORD: 's3cret' },
+  });
+  try {
+    await waitFor('auth challenge (browse phase)', async () => (await api('GET', '/api/health')).status === 401);
+    const noAuth = await browse(browseRoot);
+    check('browse: unauthenticated -> 401', noAuth.status === 401, noAuth.status);
+    const auth = { Authorization: `Basic ${Buffer.from('admin:s3cret').toString('base64')}` };
+    const withAuth = await browse(browseRoot, auth);
+    check('browse: authenticated -> 200 with the listing',
+      withAuth.status === 200 && (withAuth.json.dirs || []).some((d) => d.name === 'proj'),
+      withAuth.status);
+  } finally {
+    await stopManager(mgr);
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

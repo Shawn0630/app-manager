@@ -103,6 +103,7 @@ async function main() {
   await gitC(seed, ['remote', 'add', 'origin', remote]);
   await gitC(seed, ['push', 'origin', 'main']);
   await sh('git', ['clone', remote, workdir]);
+  fs.mkdirSync(path.join(workdir, 'src'), { recursive: true });
   fs.writeFileSync(path.join(workdir, '.env'), '# demo app settings\nAPP_NAME=demo\nAPI_KEY=sk-demo-123456\nDEBUG=false\n');
   const { stdout: headOut } = await gitC(workdir, ['rev-parse', 'HEAD']);
   const head = headOut.trim();
@@ -240,6 +241,20 @@ async function main() {
     await sleep(600);
     await page.screenshot({ path: path.join(WORK, 'dashboard-add.png'), fullPage: true });
     console.log('saved dashboard-add.png (Add Project view)');
+
+    // Folder browser: prefill the local form's path input with the
+    // fixture workdir, open the picker there (it starts at the
+    // typed path) and screenshot it — the probe line should call
+    // out the git repo and the compose file.
+    await page.evaluate((p) => {
+      document.querySelector('#localForm input[name="path"]').value = p;
+      document.getElementById('browseBtn').click();
+    }, workdir);
+    await page.waitForSelector('#browseModal:not(.hidden) .browse-item', { timeout: 20_000 });
+    await sleep(600);
+    await page.screenshot({ path: path.join(WORK, 'dashboard-browse.png') });
+    console.log('saved dashboard-browse.png (folder browser)');
+    await page.evaluate(() => document.getElementById('browseClose').click());
 
     // Narrow viewport on the Apps view: cards must collapse to a
     // single column without horizontal overflow.

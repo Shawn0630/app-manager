@@ -13,7 +13,9 @@ import { parseRepo } from './github.js';
 
 const COMPOSE_CANDIDATES = ['docker-compose.yml', 'compose.yml', 'compose.yaml'];
 
-function detectComposeFile(workdir) {
+// Exported for the folder browser (src/browse.js), which reports
+// the same detection for the folder being picked.
+export function detectComposeFile(workdir) {
   return COMPOSE_CANDIDATES.find((f) => fs.existsSync(path.join(workdir, f))) || null;
 }
 

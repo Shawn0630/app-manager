@@ -184,7 +184,14 @@ immediately, no restart).
 **From a local folder** — give the path of a folder that already
 exists on the machine. It is registered **in place**
 (`source: "local"`, workdir = the folder itself): nothing is
-copied, moved, or cloned. The path must be a full absolute path —
+copied, moved, or cloned. The form's **Browse…** button opens a
+folder picker (`GET /api/browse`, behind the same Basic auth)
+that walks the directories the manager itself can see — a web
+page cannot open the OS file dialog, and a folder that was never
+mounted into the manager container simply does not appear in
+the picker. Each folder is probed as you browse (git repository?
+GitHub remote? compose file?), so its status is visible before
+you add it. The path must be a full absolute path —
 `~` is not expanded — and when the manager itself runs in Docker
 the folder must be mounted into the manager container at that same
 absolute path (see the volumes comments in the manager's

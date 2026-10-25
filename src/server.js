@@ -15,6 +15,10 @@
 //   GET/PUT /api/apps/:id/env/dynamic    dynamic layer (deploy-time overrides)
 //   GET    /api/apps/:id/env/current     "currently in use" effective env
 //   GET    /api/deployments?limit=20
+//   GET    /api/browse?path=<abs path>   folder picker for Add
+//                                      Project (local folder):
+//                                      lists the directories the
+//                                      manager itself can see
 // Everything else is the static dashboard in public/.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,6 +37,7 @@ import { readEnvFile, saveEnvFile } from './envfile.js';
 import { getProvider } from './providers/index.js';
 import { startPollers, watchApp, unwatchApp } from './poller.js';
 import { registerApp, registerLocalApp, isInsideAppsRoot } from './registry.js';
+import { browseDirectory } from './browse.js';
 import { refreshRuns } from './actionsWatch.js';
 import { hasGitHubRemote } from './github.js';
 import { clearAppState } from './appstate.js';
@@ -149,6 +154,19 @@ app.delete('/api/apps/:id', async (req, res) => {
   unwatchApp(a.id);
   clearAppState(a.id);
   return res.json({ ok: true, removed: a.id, purged: purge });
+});
+
+// Folder picker for Add Project → "from a local folder": list the
+// directories the manager process can see (path omitted = filesystem
+// root), with the same git/compose probe the registration applies.
+// Behind the same Basic auth as everything else; reads directory
+// names only, never file contents.
+app.get('/api/browse', async (req, res) => {
+  try {
+    return res.json(await browseDirectory(req.query.path));
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: e.message || String(e) });
+  }
 });
 
 app.get('/api/deployments', (req, res) => {
