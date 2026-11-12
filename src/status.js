@@ -6,6 +6,7 @@ import * as git from './git.js';
 import { lastDeploymentFor } from './deployments.js';
 import { appState } from './store.js';
 import { detectEnvFiles } from './envdetect.js';
+import { resolveWarning } from './registry.js';
 
 // The port story has two sources: the port registered for the
 // app (app.port, from Add Project / config) and the port the app
@@ -90,7 +91,10 @@ export async function appStatus(app) {
     provider: app.provider,
     trigger: app.trigger,
     workflow: app.workflow || null,
-    warning: app.warning || null,
+    // Registration-time warnings can go stale (see resolveWarning):
+    // show the warning as it stands against the current filesystem,
+    // not the snapshot stored at registration.
+    warning: resolveWarning(app),
     state: ps.state,
     containers: ps.containers,
     // The most recent status-collection problem for this app (docker

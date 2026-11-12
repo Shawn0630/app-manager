@@ -44,7 +44,7 @@ import { readEnvFile, saveEnvFile, normalizeEnvRel } from './envfile.js';
 import { detectEnvFiles } from './envdetect.js';
 import { getProvider } from './providers/index.js';
 import { startPollers, watchApp, unwatchApp } from './poller.js';
-import { registerApp, registerLocalApp, isInsideAppsRoot, detectComposeFile } from './registry.js';
+import { registerApp, registerLocalApp, isInsideAppsRoot, detectComposeFile, resolveWarning } from './registry.js';
 import { browseDirectory } from './browse.js';
 import { scanPorts, validateScanPath } from './portscan.js';
 import { analyzeProject } from './analyze.js';
@@ -60,6 +60,21 @@ try {
 } catch (e) {
   console.error(`Failed to load config ${CONFIG_PATH}: ${e.message}`);
   process.exit(1);
+}
+// Persist the same correction resolveWarning makes at display time:
+// a no-compose warning whose file has since arrived is cleared from
+// the registry file itself, so the cleared state survives a restart
+// on its own instead of depending on the live recompute in appStatus.
+{
+  let changed = false;
+  for (const a of apps) {
+    const resolved = resolveWarning(a);
+    if (resolved !== a.warning) {
+      a.warning = resolved;
+      changed = true;
+    }
+  }
+  if (changed) saveApps(apps);
 }
 const byId = new Map(apps.map((a) => [a.id, a]));
 

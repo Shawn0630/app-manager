@@ -529,6 +529,29 @@ async function main() {
       addBad.status === 201 && typeof addBadJson.warning === 'string' && addBadJson.warning.includes('clone failed'),
       addBadJson.warning);
 
+    // Stale-warning fix: the no-compose warning clears once the file
+    // arrives — on the live card (no restart) and, after a restart,
+    // from the registry file itself. The clone-failed warning is
+    // untouched by the same restart.
+    fs.writeFileSync(path.join(appsRoot, 'nocompose', 'docker-compose.yml'), 'services:\n  web:\n    image: nginx:alpine\n');
+    const ncFixed = await getAppById('nocompose');
+    check('no-compose warning clears from the card once the file exists',
+      ncFixed && !ncFixed.warning, ncFixed && ncFixed.warning);
+    await stopManager(mgr);
+    mgr = startManager({ configPath: ghCfg, dataDir: ghData, extraEnv: ghEnv });
+    await waitHealth();
+    const ncAfterRestart = await getAppById('nocompose');
+    check('no-compose warning stays cleared after a manager restart',
+      ncAfterRestart && !ncAfterRestart.warning, ncAfterRestart && ncAfterRestart.warning);
+    const cfgAfterRestart = JSON.parse(fs.readFileSync(ghCfg, 'utf8'));
+    const ncOnDisk = cfgAfterRestart.apps.find((x) => x.id === 'nocompose');
+    check('registry file no longer carries the stale warning',
+      ncOnDisk && ncOnDisk.warning == null, ncOnDisk && ncOnDisk.warning);
+    const nopeAfterRestart = await getAppById('nope');
+    check('clone-failed warning survives the same restart',
+      nopeAfterRestart && typeof nopeAfterRestart.warning === 'string' && nopeAfterRestart.warning.includes('clone failed'),
+      nopeAfterRestart && nopeAfterRestart.warning);
+
     // DELETE: plain removal keeps the workdir; purge removes it.
     const del1 = await fetch(`${BASE}/api/apps/nope`, { method: 'DELETE' });
     check('DELETE removes an app from the registry', del1.status === 200, del1.status);

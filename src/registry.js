@@ -24,6 +24,23 @@ function noComposeWarning() {
   return `no compose file found in repo root (looked for ${COMPOSE_CANDIDATES.join(' / ')})`;
 }
 
+// The stored `warning` is a registration-time snapshot: it is set
+// once and never recomputed, so a problem fixed afterwards (a
+// compose file added by a later pull) stays on the card forever.
+// Resolve it against the current filesystem: drop the no-compose
+// segment when a compose file is now present. A local-folder
+// registration can hold several warnings joined with '; ', so the
+// no-compose text is matched as one whole segment and every other
+// segment is kept untouched. A warning is never invented here — if
+// the file is still missing, the stored warning stands as-is.
+export function resolveWarning(app) {
+  const warning = app && app.warning ? String(app.warning) : null;
+  if (!warning) return null;
+  if (!detectComposeFile(app.workdir)) return warning;
+  const kept = warning.split('; ').filter((seg) => seg !== noComposeWarning());
+  return kept.length ? kept.join('; ') : null;
+}
+
 function dedupId(baseId, existingIds) {
   let id = baseId;
   let n = 2;
