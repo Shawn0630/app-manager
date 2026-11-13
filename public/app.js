@@ -357,6 +357,19 @@ function historyRow(d) {
 
 let lastDeployments = [];
 
+// Fingerprint of the last deployments payload actually rendered.
+// The poll loop refetches the Activity stream every 10 s (2 s while
+// busy); rebuilding the whole list each time collapses any open
+// <details> and makes the list flicker. Records are append-only and
+// the payload carries no per-fetch fields, so an unchanged
+// fingerprint means nothing new to show — skip the DOM rebuild;
+// the poll itself keeps running.
+let lastDeploymentsFingerprint = null;
+
+function deploymentsFingerprint(deployments) {
+  return JSON.stringify(deployments || []);
+}
+
 function renderHistory(deployments) {
   lastDeployments = deployments || lastDeployments;
   const filterEl = $('historyFilter');
@@ -410,7 +423,15 @@ async function refresh() {
       syncHistoryFilter(apps);
     }
     if (depsRes && depsRes.status === 'fulfilled') {
-      renderHistory(depsRes.value.deployments || []);
+      const list = depsRes.value.deployments || [];
+      // Re-render the Activity list only when the stream actually
+      // changed; otherwise the open <details> rows and the list
+      // itself stay exactly as they are.
+      const fp = deploymentsFingerprint(list);
+      if (fp !== lastDeploymentsFingerprint) {
+        lastDeploymentsFingerprint = fp;
+        renderHistory(list);
+      }
     }
     if (appsRes.status === 'fulfilled' || (depsRes && depsRes.status === 'fulfilled')) {
       updatedEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
